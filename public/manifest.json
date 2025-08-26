@@ -1,26 +1,45 @@
 {
   "manifest_version": 3,
-  "name": "FB Auto Poster",
-  "version": "1.0",
-  "permissions": ["scripting", "tabs", "storage"],
-  "host_permissions": ["https://www.facebook.com/*"],
+  "name": "Auto FB Poster",
+  "version": "2.0.0",
+  "description": "Lấy bài viết từ Google Sheet và tự động đăng lên Facebook cá nhân",
+  "permissions": [
+    "storage",
+    "scripting",
+    "tabs",
+    "activeTab",
+    "clipboardWrite",
+    "alarms",
+    "webRequest"
+  ],
+  "host_permissions": [
+    "https://www.facebook.com/*",
+    "https://facebook.com/*",
+    "https://docs.google.com/*",
+    "https://sheets.googleapis.com/*",
+    "https://user-images.githubusercontent.com/*",
+    "https://*/*",
+    "http://*/*",
+    "*://*.fbcdn.net/*",
+    "*://*.facebook.com/*",
+    "https://asia-southeast1-autopostermmo.cloudfunctions.net/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
   "action": {
-    "default_popup": "index.html",
-    "default_title": "FB Auto Poster"
+    "default_popup": "index.html"
   },
   "content_scripts": [
     {
-      "matches": [
-        "https://www.facebook.com/groups/*",
-        "https://www.facebook.com/me",
-        "https://www.facebook.com/profile.php*"
-      ],
-      "js": ["contentScript.js"],
-      "run_at": "document_idle"
+      "matches": ["https://*.facebook.com/*"],
+      "js": ["contentScript.js"]
     }
   ],
-  "background": {
-    "service_worker": "background.js",
-    "type": "module"
-  }
+  "web_accessible_resources": [
+    {
+      "resources": ["contentScript.js"],
+      "matches": ["https://*.facebook.com/*"]
+    }
+  ]
 }
