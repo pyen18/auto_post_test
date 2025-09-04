@@ -1,4 +1,4 @@
-import type { Post, ScheduleItem, AlarmResponse } from "../utils/types";
+import type { Post, ScheduleItem, AlarmResponse, SyncResponse } from "../utils/types";
 
 type RuntimeCallback = (response: AlarmResponse | undefined) => void;
 
@@ -25,3 +25,9 @@ export function listAlarms(cb?: RuntimeCallback): void {
     if (cb) cb(res as AlarmResponse);
   });
 }
+export function syncFromSheet(cb?: (res?: SyncResponse) => void): void {
+  chrome.runtime.sendMessage({ type: "SYNC_FROM_SHEET" }, (res) => {
+    if (cb) cb(res as SyncResponse);
+  });
+}
+

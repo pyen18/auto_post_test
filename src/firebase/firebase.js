@@ -1,39 +1,120 @@
 // Import the functions you need from the SDKs you need
 import { initializeApp } from "firebase/app";
-import { getDatabase, ref, onValue } from "firebase/database";
-import { onChildAdded, remove } from "firebase/database";
-import { postContentToFacebook } from "../content/post.ts";
-// TODO: Add SDKs for Firebase products that you want to use
-// https://firebase.google.com/docs/web/setup#available-libraries
+import {
+  getDatabase,
+  ref,
+  set,
+  onChildAdded,
+  remove, 
+  get,
+  child,
+} from "firebase/database";
 
 // Your web app's Firebase configuration
 const firebaseConfig = {
   apiKey: "AIzaSyDc4m_kk6RMWKrOtsMErgWjueMdgftyypg",
   authDomain: "autopostermmo.firebaseapp.com",
+  databaseURL: "https://autopostermmo-default-rtdb.firebaseio.com",
   projectId: "autopostermmo",
   storageBucket: "autopostermmo.firebasestorage.app",
   messagingSenderId: "916563696851",
   appId: "1:916563696851:web:0d724dac43a21adc840826",
 };
 
-// Initialize Firebase
-const app = initializeApp(firebaseConfig);
-const db = getDatabase(app);
+let firebaseApp = null;
+let db = null;
 
-export function initializeFirebaseSync(onJobsUpdate) {
-  const postsRef = ref(db, "autoPosts");
-  onValue(postsRef, (snapshot) => {
-    const data = snapshot.val();
-    if (!data) return;
-    const jobs = Object.keys(data).map((k) => ({ rowId: k, ...data[k] }));
-    chrome.storage.local.set({ schedule: jobs });
-    onJobsUpdate(jobs);
+ // Khởi tạo Firebase client (gọi một lần trong background script)
+export function initFirebaseClient() {
+  if (firebaseApp) return { app: firebaseApp, db };
+  firebaseApp = initializeApp(firebaseConfig);
+  db = getDatabase(firebaseApp);
+  console.log("[Firebase] initialized (client)");
+  return { app: firebaseApp, db };
+}
+
+export function getDb() {
+  if (!db) initFirebaseClient();
+  return db;
+}
+
+/**
+ * Ghi toàn bộ node autoPosts (overwrite) - dùng khi sync sheet -> RTDB
+ * updates: object with keys = rowId, values = { rowId, content, time, mediaUrls, status }
+ */
+export async function setAutoPostsNode(updates) {
+  console.log("[Firebase] Writing to autoPosts:", updates);
+  const db = getDb();
+  await set(ref(db, "autoPosts"), updates);
+    console.log("[Firebase] ✅ Write complete");
+}
+
+/**
+ * Set status for specific post row
+ */
+
+export async function setAutoPostStatus(rowId, status) {
+  if (!rowId) return;
+  const db = getDb();
+  await set(ref(db, `autoPosts/${rowId}/status`), status);
+}
+export async function saveCache(data) {
+  return new Promise((res) => {
+    chrome.storage.local.set({ autoPostsCache: data }, () => res());
   });
 }
-const MARK_POSTED_URL =
-  "https://asia-southeast1-autopostermmo.cloudfunctions.net/markPosted";
 
-async function tickAfterPost(rowId) {
+/**
+ * Start listening for triggers/child_added.
+ * If cb provided, call cb(triggerObject). Otherwise log.
+ * Trigger object expected shape: { rowId, content, mediaUrls, createdAt }
+ */
+
+export function startTriggerListener(cb) {
+  const db = getDb();
+  const triggersRef = ref(db, "triggers");
+  onChildAdded(triggersRef, (snap) => {
+    const data = snap.val();
+    console.log("[Firebase] trigger child_added:", data);
+    if (typeof cb === "function") {
+      (async () => {
+        try {
+          await cb(data);
+        } catch (e) {
+          console.error("[startTriggerListener] cb error:", e);
+        }
+      })();
+    } else {
+      console.log("[startTriggerListener] no callback passed; ignoring trigger.");
+    }
+  });
+}
+
+
+/**
+ * Utility: remove a trigger by rowId
+ */
+export async function removeTrigger(rowId) {
+  const db = getDb();
+  try {
+    await remove(ref(db, `triggers/${rowId}`));
+  } catch (e) {
+    console.error("[Firebase] removeTrigger failed:", e);
+  }
+}
+/**
+ * Utility: read autoPosts once (useful for debugging)
+ */
+export async function readAutoPostsOnce() {
+  const db = getDb();
+  const rootRef = ref(db, "/");
+  const snapshot = await get(child(rootRef, "autoPosts"));
+  return snapshot.exists() ? snapshot.val() : null;
+}
+
+const MARK_POSTED_URL = "https://asia-southeast1-autopostermmo.cloudfunctions.net/markPosted";
+
+export async function tickAfterPost(rowId) {
   const maxTries = 3;
   let attempt = 0;
   let ok = false;
@@ -59,6 +140,28 @@ async function tickAfterPost(rowId) {
   }
   return ok;
 }
+
+
+/*
+// Initialize Firebase
+/*
+const app = initializeApp(firebaseConfig);
+const db = getDatabase(app);
+
+export function initializeFirebaseSync(onJobsUpdate) {
+  const postsRef = ref(db, "autoPosts");
+  onValue(postsRef, (snapshot) => {
+    const data = snapshot.val();
+    if (!data) return;
+    const jobs = Object.keys(data).map((k) => ({ rowId: k, ...data[k] }));
+    chrome.storage.local.set({ schedule: jobs });
+    onJobsUpdate(jobs);
+  });
+}
+const MARK_POSTED_URL =
+  "https://asia-southeast1-autopostermmo.cloudfunctions.net/markPosted";
+
+
 export function startTriggerListener() {
   onChildAdded(ref(db, "triggers"), async (snap) => {
     const job = snap.val();
@@ -100,3 +203,4 @@ export function startTriggerListener() {
   });
 }
 
+*/

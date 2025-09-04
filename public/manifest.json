@@ -22,7 +22,8 @@
     "http://*/*",
     "*://*.fbcdn.net/*",
     "*://*.facebook.com/*",
-    "https://asia-southeast1-autopostermmo.cloudfunctions.net/*"
+    "https://asia-southeast1-autopostermmo.cloudfunctions.net/*",
+    "https://*.firebaseio.com/*"
   ],
   "background": {
     "service_worker": "background.js"

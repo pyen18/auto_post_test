@@ -49,10 +49,27 @@ export async function listAutoPostAlarms() {
 }
 
 // ======= Storage helpers =======
-export async function getSchedule() {
-  const data = await chrome.storage.local.get("schedule");
-  return data.schedule || [];
+export function getSchedule() {
+  return new Promise((resolve) => {
+    try {
+      chrome.storage.local.get("schedule", (res) => {
+        resolve(res.schedule || []);
+      });
+    } catch (err) {
+      console.error("[getSchedule] Error:", err);
+      resolve([]);
+    }
+  });
 }
-export async function setSchedule(schedule) {
-  await chrome.storage.local.set({ schedule });
+export function setSchedule(jobs) {
+  return new Promise((resolve, reject) => {
+    try {
+      chrome.storage.local.set({ schedule: jobs }, () => {
+        if (chrome.runtime.lastError) return reject(chrome.runtime.lastError);
+        resolve(true);
+      });
+    } catch (err) {
+      reject(err);
+    }
+  });
 }
