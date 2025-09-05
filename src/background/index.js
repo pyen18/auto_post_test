@@ -474,92 +474,121 @@ async function runPostViaContentScript(tabId, posts) {
   const injectAndVerifyContentScript = async () => {
     console.log("[content] Starting content script injection...");
 
-    // First ensure content script is registered
-    await ensureContentScriptRegistered();
-
-    // Then clear any existing state
     try {
+      // First unregister any existing content scripts
+      try {
+        await chrome.scripting.unregisterContentScripts({
+          ids: ["autoposter-dynamic"]
+        });
+      } catch (e) {
+        // Ignore unregister errors
+        console.warn("[content] Error unregistering scripts:", e);
+      }
+
+      // Register fresh content script with proper error handling
+      await chrome.scripting.registerContentScripts([{
+        id: "autoposter-dynamic",
+        matches: ["https://*.facebook.com/*"],
+        js: ["contentScript.js"],
+        runAt: "document_idle",
+        world: "ISOLATED"
+      }]);
+
+      // Give the script time to initialize
+      await new Promise(resolve => setTimeout(resolve, 1000));
+
+      // Clear any existing state with better error handling
       await chrome.scripting.executeScript({
         target: { tabId },
         func: () => {
-          // Clear all window state
-          if (window.postingInProgress) delete window.postingInProgress;
-          if (window.currentPostOperation) delete window.currentPostOperation;
-          
-          // Remove known listeners
-          const knownListeners = ['__autoPostBeforeUnload', '__autoPostVisibilityChange'];
-          for (const listener of knownListeners) {
-            if (window[listener]) {
-              window.removeEventListener('beforeunload', window[listener]);
-              window.removeEventListener('visibilitychange', window[listener]);
-              delete window[listener];
-            }
+          try {
+            // Clean up old state and listeners
+            if (window.postingInProgress) delete window.postingInProgress;
+            if (window.currentPostOperation) delete window.currentPostOperation;
+            
+            ['beforeunload', 'visibilitychange'].forEach(event => {
+              try {
+                window.removeEventListener(event, window[`__autoPost${event}`]);
+                delete window[`__autoPost${event}`];
+              } catch (e) {
+                console.warn(`Error removing ${event} listener:`, e);
+              }
+            });
+
+            // Set up error handler
+            window.onerror = (msg, url, line, col, error) => {
+              console.error('[AutoPoster Error]', {msg, url, line, col, error});
+              return false;
+            };
+          } catch (e) {
+            console.warn('[content] State cleanup error:', e);
           }
         }
       });
-    } catch (e) {
-      console.warn("[content] Error clearing state:", e);
-      // Continue anyway as this is just cleanup
-    }
 
-    // Inject fresh content script
-    try {
-      await chrome.scripting.executeScript({
-        target: { tabId },
-        files: ["contentScript.js"]
-      });
-      console.log("[content] Content script injected");
-    } catch (e) {
-      console.error("[content] Script injection failed:", e);
+      return true;
+    } catch (err) {
+      console.error("[content] Failed to cleanup/reinject:", err);
       return false;
     }
-
-    // Verify script is working
-    try {
-      const response = await new Promise((resolve) => {
-        const timeout = setTimeout(() => resolve(null), 3000);
-        chrome.tabs.sendMessage(tabId, { type: "PING" }, (response) => {
-          clearTimeout(timeout);
-          resolve(response);
-        });
-      });
-
-      if (response?.ready) {
-        console.log("[content] Content script verified working");
-        return true;
-      }
-    } catch (e) {
-      console.warn("[content] Script verification failed:", e);
-    }
-
-    return false;
   };
 
-  // Try multiple times to get the content script working
+  // Enhanced content script initialization with better error handling
   const maxAttempts = 5;
   let scriptReady = false;
+  let lastError = null;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     console.log(`[content] Attempt ${attempt}/${maxAttempts} to initialize content script`);
     
-    scriptReady = await injectAndVerifyContentScript();
-    
-    if (scriptReady) {
-      console.log("[content] Content script successfully initialized");
-      break;
-    }
+    try {
+      // Verify tab is still valid and on Facebook
+      const tab = await chrome.tabs.get(tabId);
+      if (!tab?.url?.includes('facebook.com')) {
+        lastError = "Tab not on Facebook";
+        console.error("[content] Tab validation failed:", lastError);
+        return { success: false, message: lastError };
+      }
 
-    if (attempt < maxAttempts) {
-      // Wait between attempts
-      console.log("[content] Waiting before retry...");
-      await new Promise(r => setTimeout(r, 2000));
-      
-      // Verify tab is still valid before retrying
+      // Clear any existing content script
       try {
-        await chrome.tabs.get(tabId);
+        await chrome.scripting.unregisterContentScripts({
+          ids: ["autoposter-dynamic"]
+        });
       } catch (e) {
-        console.error("[content] Tab no longer exists:", e);
+        // Ignore unregister errors
+      }
+
+      // Wait a moment for cleanup
+      await new Promise(r => setTimeout(r, 500));
+      
+      // Register and verify content script
+      scriptReady = await injectAndVerifyContentScript();
+      
+      if (scriptReady) {
+        console.log("[content] Content script successfully initialized");
+        break;
+      }
+
+      // If not successful but not last attempt
+      if (attempt < maxAttempts) {
+        console.log(`[content] Initialization failed, waiting ${2000}ms before retry...`);
+        await new Promise(r => setTimeout(r, 2000));
+        
+        // Double check tab still exists
+        await chrome.tabs.get(tabId);
+      }
+    } catch (err) {
+      lastError = err.message || String(err);
+      console.error(`[content] Error in attempt ${attempt}:`, err);
+      
+      if (err.message?.includes("No tab with id")) {
         return { success: false, message: "Tab was closed" };
+      }
+
+      // Wait before next attempt if not last try
+      if (attempt < maxAttempts) {
+        await new Promise(r => setTimeout(r, 2000));
       }
     }
   }
@@ -588,22 +617,58 @@ async function runPostViaContentScript(tabId, posts) {
     const retryDelay = 2000; // 2 seconds between retries
     let lastError = null;
 
-    // Helper function to verify content script is working
+    // Enhanced content script verification
     const verifyContentScript = async (tabId) => {
+      // First verify the tab is still valid
+      try {
+        const tab = await chrome.tabs.get(tabId);
+        if (!tab || !tab.url?.includes('facebook.com')) {
+          console.warn("[content] Tab invalid or not on Facebook");
+          return false;
+        }
+      } catch (e) {
+        console.error("[content] Tab validation failed:", e);
+        return false;
+      }
+
+      // Then check if content script is responsive
       try {
         const response = await new Promise((resolve) => {
-          const timeout = setTimeout(() => resolve(false), 5000);
-          chrome.tabs.sendMessage(tabId, { type: "PING" }, (response) => {
+          const timeout = setTimeout(() => {
+            console.warn("[content] PING timeout");
+            resolve(false);
+          }, 5000);
+
+          const handleResponse = (response) => {
             clearTimeout(timeout);
             if (chrome.runtime.lastError) {
+              console.warn("[content] PING error:", chrome.runtime.lastError);
               resolve(false);
-            } else {
-              resolve(response?.ready === true);
+              return;
             }
-          });
+            resolve(response?.ready === true);
+          };
+
+          try {
+            chrome.tabs.sendMessage(tabId, { 
+              type: "PING",
+              timestamp: Date.now()
+            }, handleResponse);
+          } catch (e) {
+            console.error("[content] Send message failed:", e);
+            clearTimeout(timeout);
+            resolve(false);
+          }
         });
-        return response;
+
+        if (!response) {
+          console.warn("[content] Script verification failed");
+          return false;
+        }
+
+        return true;
       } catch (e) {
+        console.error("[content] Verification error:", e);
         return false;
       }
     };
@@ -611,12 +676,34 @@ async function runPostViaContentScript(tabId, posts) {
     // Helper function to inject content script
     const injectContentScript = async (tabId) => {
       try {
+        // First clear any existing state
         await chrome.scripting.executeScript({
           target: { tabId },
-          files: ['content/index.js']
+          func: () => {
+            // Clean up old state
+            if (window.postingInProgress) delete window.postingInProgress;
+            if (window.currentPostOperation) delete window.currentPostOperation;
+            
+            // Remove old listeners
+            ['beforeunload', 'visibilitychange'].forEach(event => {
+              try {
+                window.removeEventListener(event, window[`__autoPost${event}`]);
+                delete window[`__autoPost${event}`];
+              } catch (e) {
+                console.warn(`Error removing ${event} listener:`, e);
+              }
+            });
+          }
         });
-        // Wait a bit for script to initialize
-        await new Promise(r => setTimeout(r, 500));
+
+        // Inject the script
+        await chrome.scripting.executeScript({
+          target: { tabId },
+          files: ['contentScript.js'] // Fixed path to match registration
+        });
+
+        // Wait for script to initialize
+        await new Promise(r => setTimeout(r, 1000));
         return true;
       } catch (e) {
         console.error("[content] Script injection failed:", e);
@@ -854,29 +941,130 @@ startTriggerListener(async (trigger) => {
 
 
 
-function updatePostStatusInFirebase(rowId, status) {
+async function updatePostStatusInFirebase(rowId, status, attempt = 1) {
+  const MAX_RETRIES = 3;
+  const RETRY_DELAY = 2000;
   const dbUrl = `https://autopostermmo-default-rtdb.firebaseio.com/autoPosts/${rowId}.json`;
 
-  fetch(dbUrl, {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ status }),
-  })
-    .then((res) => res.json())
-    .then((data) => {
-      console.log(`[Firebase] ✅ Updated rowId=${rowId} to status=${status}`, data);
+  try {
+    console.log(`[Firebase] Updating status for rowId=${rowId} (attempt ${attempt}/${MAX_RETRIES})`);
 
-      // Gửi log cho popup UI
-      chrome.runtime.sendMessage({ type: "STATUS_LOG", rowId, status });
-    })
-    .catch((err) => {
-      console.error(`[Firebase] ❌ Failed to update status for rowId=${rowId}`, err);
+    const response = await fetch(dbUrl, {
+      method: "PATCH",
+      headers: { 
+        "Content-Type": "application/json",
+        "Accept": "application/json"
+      },
+      body: JSON.stringify({ status }),
+      // Add cache control to prevent stale responses
+      cache: 'no-cache'
     });
+
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+
+    // Safety check for content type
+    const contentType = response.headers.get("content-type");
+    if (!contentType || !contentType.toLowerCase().includes("application/json")) {
+      throw new Error(`Invalid content type: ${contentType}`);
+    }
+
+    // Read response as text first
+    const text = await response.text();
+    
+    // Validate response format
+    if (!text || text.trim().length === 0) {
+      throw new Error("Empty response received");
+    }
+
+    // Check for HTML response
+    if (text.trim().startsWith("<")) {
+      console.error(`[Firebase] Received HTML response:`, text.substring(0, 100));
+      throw new Error("Received HTML instead of JSON");
+    }
+
+    try {
+      // Parse validated text as JSON
+      const data = JSON.parse(text);
+      
+      // Verify the parsed data
+      if (data === null || typeof data !== 'object') {
+        throw new Error("Invalid response format");
+      }
+
+      console.log(`[Firebase] ✅ Updated rowId=${rowId} to status=${status}`, data);
+      
+      // Notify UI of status change
+      try {
+        chrome.runtime.sendMessage({ type: "STATUS_LOG", rowId, status });
+      } catch (msgError) {
+        console.warn("[Firebase] Failed to send status update message:", msgError);
+      }
+
+      return true;
+    } catch (parseError) {
+      throw new Error(`JSON parse error: ${parseError.message}`);
+    }
+  } catch (error) {
+    console.error(`[Firebase] ❌ Update failed for rowId=${rowId}:`, error);
+
+    // Determine if error is retryable
+    const isRetryable = 
+      error.message.includes("NetworkError") ||
+      error.message.includes("Failed to fetch") ||
+      error.message.includes("HTML instead of JSON") ||
+      error.message.startsWith("HTTP error!") ||
+      error.message.includes("Invalid content type");
+
+    // Attempt retry if appropriate
+    if (isRetryable && attempt < MAX_RETRIES) {
+      console.log(`[Firebase] Retrying update after ${RETRY_DELAY}ms (attempt ${attempt}/${MAX_RETRIES})...`);
+      await new Promise(resolve => setTimeout(resolve, RETRY_DELAY));
+      return updatePostStatusInFirebase(rowId, status, attempt + 1);
+    }
+
+    // If we've exhausted retries, try an alternative approach
+    if (attempt >= MAX_RETRIES) {
+      console.error(`[Firebase] Failed to update after ${MAX_RETRIES} attempts, trying alternative endpoint...`);
+      try {
+        // Try alternative update method (e.g., using a different endpoint or REST API)
+        const altResponse = await fetch(`https://autopostermmo-default-rtdb.firebaseio.com/autoPosts/${rowId}/status.json`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(status)
+        });
+        
+        if (altResponse.ok) {
+          console.log(`[Firebase] ✅ Alternative update successful for rowId=${rowId}`);
+          return true;
+        }
+      } catch (altError) {
+        console.error("[Firebase] Alternative update also failed:", altError);
+      }
+    }
+
+    return false;
+  }
 }
 
 // ======= FIXED MESSAGE LISTENER - NO DUPLICATES =======
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-  console.log("[Background] Received message:", message.type);
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  const tabId = sender?.tab?.id;
+  console.log("[Background] Received message:", message.type, "from tab:", tabId);
+
+  // Keep track of active connections
+  const connections = new Set();
+  if (tabId) {
+    connections.add(tabId);
+    
+    // Clean up when tab closes
+    chrome.tabs.onRemoved.addListener((closedTabId) => {
+      if (connections.has(closedTabId)) {
+        connections.delete(closedTabId);
+      }
+    });
+  }
 
   (async () => {
     try {
@@ -1019,39 +1207,3 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
   return true;
 });
-
-
-
-
-
-// ======= Bắt sự kiện tới giờ =======
-/*
-/* Khi báo thức nổ, lấy item tương ứng HH:mm, gọi openFacebookAndPost([{content, mediaUrls}]) 
-chrome.alarms.onAlarm.addListener(async (alarm) => {
-  if (!alarm?.name?.startsWith(ALARM_PREFIX)) return;
-  const hhmm = alarm.name.substring(ALARM_PREFIX.length);
-  console.log("⏰ Alarm fired:", alarm.name, "->", hhmm);
-  const schedule = await getSchedule();
-  const item = schedule.find((s) => s.time === hhmm);
-  if (!item) {
-    console.warn("⚠️ Không tìm thấy content cho", hhmm);
-    return;
-  }
-  console.log("🎯 Auto posting at", hhmm, ":", {
-    content: item.content?.substring(0, 50),
-    mediaUrls: item.mediaUrls,
-  });
-  openFacebookAndPost([
-    { content: item.content, mediaUrls: item.mediaUrls || [] },
-  ]);
-});
-initializeFirebaseSync(async (jobs) => {
-  await clearAllAutoPostAlarms();
-  for (const job of jobs) {
-    if (job.status === "pending" && job.time) {
-      await createDailyAlarm(job.time);
-    }
-  }
-  console.log(`✅ Synced ${jobs.length} jobs and alarms created`);
-});
-*/

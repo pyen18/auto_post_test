@@ -10,35 +10,37 @@ interface WindowWithFlags extends Window {
   };
 }
 
-// Enhanced initialization tracking
-const win = window as WindowWithFlags;
-const currentState = {
-  initialized: false,
-  initTime: Date.now(),
-  version: '1.0.0', // Update this when making major changes
-  url: window.location.href
-};
+// Enhanced initialization tracking with IIFE to prevent global pollution
+(() => {
+  const win = window as WindowWithFlags;
+  const currentState = {
+    initialized: false,
+    initTime: Date.now(),
+    version: '1.0.0', // Update this when making major changes
+    url: window.location.href
+  };
 
-// Only initialize if not already initialized or if URL has changed
-if (!win.__AUTOPOSTER_STATE__ || 
-    win.__AUTOPOSTER_STATE__.url !== currentState.url ||
-    Date.now() - win.__AUTOPOSTER_STATE__.initTime > 3600000) { // Re-init after 1 hour
+  // Only initialize if not already initialized or if URL has changed
+  if (!win.__AUTOPOSTER_STATE__ || 
+      win.__AUTOPOSTER_STATE__.url !== currentState.url ||
+      Date.now() - win.__AUTOPOSTER_STATE__.initTime > 3600000) { // Re-init after 1 hour
+    
+    win.__AUTOPOSTER_STATE__ = currentState;
+    win.__AUTOPOSTER_STATE__.initialized = true;
   
-  win.__AUTOPOSTER_STATE__ = currentState;
-  win.__AUTOPOSTER_STATE__.initialized = true;
-  
-  console.log("[content] Content script initialized", {
-    url: currentState.url,
-    time: new Date(currentState.initTime).toISOString(),
-    version: currentState.version
-  });
-} else {
-  console.log("[content] Content script already active", {
-    existingUrl: win.__AUTOPOSTER_STATE__.url,
-    initTime: new Date(win.__AUTOPOSTER_STATE__.initTime).toISOString(),
-    version: win.__AUTOPOSTER_STATE__.version
-  });
-}
+    console.log("[content] Content script initialized", {
+      url: currentState.url,
+      time: new Date(currentState.initTime).toISOString(),
+      version: currentState.version
+    });
+  } else {
+    console.log("[content] Content script already active", {
+      existingUrl: win.__AUTOPOSTER_STATE__.url,
+      initTime: new Date(win.__AUTOPOSTER_STATE__.initTime).toISOString(),
+      version: win.__AUTOPOSTER_STATE__.version
+    });
+  }
+})();
 
 // Enhanced message listener with better error handling
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {

@@ -8,6 +8,7 @@ import { waitForCreatePostDialog, insertTextIntoContentEditable } from "./ui";
 // test paste link 
 
 
+
 async function validateImageSize(blob: Blob, minWidth = 200, minHeight = 200): Promise<boolean> {
   return new Promise((resolve) => {
     const url = URL.createObjectURL(blob);
@@ -42,20 +43,23 @@ function insertUrlAsText(editor: HTMLElement, url: string) {
   editor.focus();
   editor.innerHTML = "";
 
-  const success = document.execCommand("insertText", false, url);
-  if (!success) {
+  try {
+   
+    const success = document.execCommand("insertText", false, url);
+    if (!success) {
+      const textNode = document.createTextNode(url);
+      editor.appendChild(textNode);
+      editor.dispatchEvent(new InputEvent("input", { bubbles: true }));
+    } else {
+      editor.dispatchEvent(new InputEvent("input", { bubbles: true }));
+    }
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  } catch (err) {
     const textNode = document.createTextNode(url);
     editor.appendChild(textNode);
     editor.dispatchEvent(new InputEvent("input", { bubbles: true }));
-  } else {
-    editor.dispatchEvent(new InputEvent("input", { bubbles: true }));
   }
-
-  console.log("[AutoPoster] URL inserted into editor:", url);
 }
-
-
-// ====== Download media từ URL ======
 async function downloadMedia(url: string): Promise<Blob | null> {
   return new Promise((resolve) => {
     chrome.runtime.sendMessage({ type: "DOWNLOAD_MEDIA", url }, (res) => {
@@ -118,8 +122,11 @@ async function uploadMedia(dialog: HTMLElement, mediaUrls: string[]): Promise<bo
   }
 }
 
-// test post 
-export async function postContentToFacebook(content: string, mediaUrls: string[] = []): Promise<boolean> {
+// Wrap the implementation in an IIFE to prevent global variable conflicts
+export const postContentToFacebook = (() => {
+  // Internal module state// 5 seconds between attempts
+  
+  return async function(content: string, mediaUrls: string[] = []): Promise<boolean> {
   console.log("[AutoPoster] Waiting for Create Post dialog...", {
     now: new Date().toISOString(),
     url: location.href,
@@ -217,18 +224,47 @@ export async function postContentToFacebook(content: string, mediaUrls: string[]
   let postBtn: HTMLElement | undefined = undefined;
   const maxAttempts = 30;
 
+  function findSpanByText(container: HTMLElement, text: string): HTMLElement | null {
+    // Enhanced text matching with fuzzy matching for special characters
+    const normalizeText = (str: string) => str.trim().toLowerCase()
+      .normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+    
+    const targetText = normalizeText(text);
+    
+    // First try exact matches
+    const exactMatch = Array.from(container.querySelectorAll('span'))
+      .find(el => normalizeText(el.textContent || '') === targetText);
+    if (exactMatch) return exactMatch as HTMLElement;
+    
+    // Then try contains matches with specific parent class checks
+    const containsMatch = Array.from(container.querySelectorAll('span'))
+      .find(el => {
+        const elText = normalizeText(el.textContent || '');
+        const hasRelevantParent = el.closest('.x1ja2u2z, .xdj266r, .x9f619');
+        return elText.includes(targetText) && hasRelevantParent;
+      });
+    
+    return containsMatch as HTMLElement || null;
+  }
+
   function scoreButton(btn: HTMLElement): ScoredButton | null {
-    // Basic visibility checks
-    if (!btn.offsetParent || btn.offsetWidth === 0 || btn.offsetHeight === 0) return null;
+    // Enhanced visibility and state validation
+    if (!btn.isConnected || !btn.offsetParent || btn.offsetWidth === 0 || btn.offsetHeight === 0) return null;
 
     const style = window.getComputedStyle(btn);
-    if (style.display === 'none' || style.visibility === 'hidden') return null;
+    if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return null;
 
-    // Check if disabled
+    // Extended disabled state checks
     const isDisabled = btn.getAttribute('aria-disabled') === 'true' || 
                       btn.classList.contains('disabled') ||
-                      style.opacity === '0.4';
+                      btn.hasAttribute('disabled') ||
+                      style.opacity === '0.4' ||
+                      style.cursor === 'not-allowed';
     if (isDisabled) return null;
+
+    // Check for suspicious classes/attributes that might indicate non-interactive elements
+    const suspiciousClasses = ['x1h6gzvc', 'x1lq5wgf', 'xgqcy7u', 'x30kzoy'];
+    if (suspiciousClasses.some(c => btn.classList.contains(c))) return null;
 
     // Collect all text content
     const text = (btn.textContent || '').trim().toLowerCase();
@@ -315,8 +351,8 @@ export async function postContentToFacebook(content: string, mediaUrls: string[]
       'div[role="button"]',
       '[role="button"]',
       // Facebook-specific selectors
-      'div.x1ja2u2z span:has-text("Đăng")',
-      'div.xdj266r span:has-text("Đăng")',
+      'div.x1ja2u2z span',
+      'div.xdj266r span',
       'div.x9f619[role="none"]',
       'div.x1n2onr6[role="none"]',
       // Aria labeled buttons
@@ -349,21 +385,38 @@ export async function postContentToFacebook(content: string, mediaUrls: string[]
 
     // Handle button selection based on context
     if (scoredButtons.length > 0) {
-      // Check for 'Next' button first in multi-step dialogs
-      const nextButton = scoredButtons.find(b => b.type === 'next' && b.score >= 60);
-      const postButton = scoredButtons.find(b => b.type === 'post' && b.score >= 80);
-      
-      if (nextButton) {
+        // First try direct text matching
+        const nextSpan = findSpanByText(dialog, 'Tiếp');
+        const postSpan = findSpanByText(dialog, 'Đăng');
+        
+        // Helper to safely get HTMLElement from Element
+        const toHTMLElement = (el: Element | null): HTMLElement | null => 
+          el instanceof HTMLElement ? el : null;
+        
+        // Then try scored buttons as fallback
+        const nextButton = nextSpan ? { 
+          element: toHTMLElement(nextSpan.closest('[role="button"]')) || 
+                  toHTMLElement(nextSpan.parentElement), 
+          score: 100, 
+          type: 'next' as const
+        } : scoredButtons.find(b => b.type === 'next' && b.score >= 60);
+                          
+        const postButton = postSpan ? { 
+          element: toHTMLElement(postSpan.closest('[role="button"]')) || 
+                  toHTMLElement(postSpan.parentElement), 
+          score: 100, 
+          type: 'post' as const
+        } : scoredButtons.find(b => b.type === 'post' && b.score >= 80);      if (nextButton?.element) {
         postBtn = nextButton.element;
         console.log("[AutoPoster] Found Next button:", {
           score: nextButton.score,
-          text: postBtn.textContent?.trim()
+          text: postBtn?.textContent?.trim() || ''
         });
-      } else if (postButton) {
+      } else if (postButton?.element) {
         postBtn = postButton.element;
         console.log("[AutoPoster] Found Post button:", {
           score: postButton.score,
-          text: postBtn.textContent?.trim()
+          text: postBtn?.textContent?.trim() || ''
         });
       }
 
@@ -414,16 +467,27 @@ export async function postContentToFacebook(content: string, mediaUrls: string[]
     return false;
   }
 
-  // Enhanced click handling
+    // Enhanced click handling
   try {
+    // Pre-click validation
+    if (!postBtn.isConnected || !postBtn.offsetParent) {
+      console.error("[AutoPoster] Button is detached or hidden");
+      return false;
+    }
+    
+    // Check if text content is appropriate
+    const btnText = postBtn.textContent?.trim().toLowerCase() || '';
+    if (btnText.includes('hủy') || btnText.includes('đóng')) {
+      console.error("[AutoPoster] Found wrong button type:", btnText);
+      return false;
+    }
+    
     // 1. Scroll button into view if needed
     const rect = postBtn.getBoundingClientRect();
     if (rect.top < 0 || rect.bottom > window.innerHeight) {
       postBtn.scrollIntoView({ behavior: 'smooth', block: 'center' });
       await delay(500);
-    }
-
-    // 2. Enhanced click handling for specific button structure
+    }    // 2. Enhanced click handling for specific button structure
     let actualClickTarget = postBtn;
     
     // If we found the outer container, look for the clickable inner element
@@ -552,17 +616,18 @@ export async function postContentToFacebook(content: string, mediaUrls: string[]
         return true;
       }
 
-      // Enhanced state detection with more specific selectors
+      // Enhanced dialog state detection with comprehensive checks
       const state = {
-        hasNextButton: !!Array.from(document.querySelectorAll('span[class*="x1lliihq"][class*="x6ikm8r"]'))
-          .find(span => span.textContent?.trim() === 'Tiếp'),
-        hasPostButton: !!Array.from(document.querySelectorAll('span[class*="x1lliihq"][class*="x6ikm8r"]'))
-          .find(span => span.textContent?.trim() === 'Đăng'),
+        hasNextButton: findSpanByText(document.body, 'Tiếp') !== null,
+        hasPostButton: findSpanByText(document.body, 'Đăng') !== null,
         hasShareDialog: !!document.querySelector('div[aria-label="Cài đặt bài viết"]'),
         hasPostContainer: !!document.querySelector('div.x1ja2u2z.x78zum5.x2lah0s.x1n2onr6'),
-        isProcessing: !!document.querySelector('[role="progressbar"]'),
-        hasOverlay: !!document.querySelector('.x1ey2m1c'),
-        dialogText: currentDialog.textContent || '',
+        isProcessing: !!document.querySelector('[role="progressbar"], .x1jx94hy, .xh8yej3, .x1n2onr6'),
+        hasOverlay: !!document.querySelector('.x1ey2m1c, .x9f619.x1n2onr6.x1ja2u2z, .x78zum5.xdt5ytf.x1n2onr6'),
+        dialogText: currentDialog.textContent?.trim() || '',
+        hasErrorMsg: !!document.querySelector('[aria-label*="error" i], [aria-label*="lỗi" i]'),
+        hasSuccessMsg: !!document.querySelector('[aria-label*="thành công" i], [aria-label*="success" i]'),
+        imageUploading: !!document.querySelector('div[aria-label*="Đang tải" i]'),
       };
 
       const currentState = JSON.stringify(state);
@@ -578,7 +643,41 @@ export async function postContentToFacebook(content: string, mediaUrls: string[]
 
       // If processing or overlay visible, wait
       if (state.isProcessing || state.hasOverlay) {
-        console.log("[AutoPoster] Processing or overlay visible, waiting...");
+        const elapsedTime = (Date.now() - lastClickTime) / 1000;
+        
+        // If processing for too long, check for success indicators
+        if (elapsedTime > 15) {
+          // Check for common success indicators
+          const possibleSuccess = 
+            !document.querySelector('[role="dialog"]') || // Dialog closed
+            !!document.querySelector('.x1i10hfl') || // Success notification
+            document.querySelectorAll('[role="dialog"]').length === 0 || // All dialogs closed
+            document.querySelector('div[aria-label="Bài viết của bạn đã được chia sẻ"]'); // Post success message
+            
+          if (possibleSuccess) {
+            console.log("[AutoPoster] Post appears complete after timeout");
+            return true;
+          }
+        }
+        
+        // If still in first dialog after too long, try to recover
+        if (inFirstDialog && elapsedTime > 20) {
+          console.log("[AutoPoster] First dialog stuck, attempting recovery");
+          const nextButton = Array.from(document.querySelectorAll('[role="button"]'))
+            .find(btn => btn.textContent?.trim() === 'Tiếp');
+          if (nextButton) {
+            (nextButton as HTMLElement).click();
+            await delay(2000);
+          }
+        }
+        
+        // Log status and continue waiting
+        console.log("[AutoPoster] Processing or overlay visible, waiting...", {
+          elapsedTime,
+          inFirstDialog,
+          state
+        });
+        
         await delay(1000);
         continue;
       }
@@ -658,213 +757,4 @@ export async function postContentToFacebook(content: string, mediaUrls: string[]
 }
 
 
-
-/// Function to download media from a URL
-/*
-export async function postContentToFacebook(
-  content: string,
-  mediaUrls: string[],
-): Promise<boolean> {
-  console.log("[AutoPoster] Starting post process...");
-  console.log("[AutoPoster] Content length:", content?.length || 0);
-  console.log("[AutoPoster] Media URLs count:", mediaUrls?.length || 0);
-
-  const dialog = await waitForCreatePostDialog(20000); // Increased timeout
-  if (!dialog) {
-    console.error("[AutoPoster] Cannot find Create Post dialog");
-    return false;
-  }
-
-  console.log("[AutoPoster] Post dialog found, proceeding...");
-
-  // Enhanced editor detection with multiple strategies
-  const editorSelectors = [
-    "div[role='textbox'][contenteditable='true']",
-    "div[contenteditable='true'][data-lexical-editor='true']", 
-    "div[contenteditable='true'][data-text='true']",
-    "div[contenteditable='true']",
-    "[contenteditable='true']",
-    ".notranslate[contenteditable='true']"
-  ];
-
-  let editor: HTMLElement | null = null;
-  let editorFound = false;
-
-  // Try multiple detection strategies
-  for (let attempt = 0; attempt < 2 && !editorFound; attempt++) {
-    console.log(`[AutoPoster] Editor detection attempt ${attempt + 1}`);
-
-    for (const selector of editorSelectors) {
-      const elements = Array.from(dialog.querySelectorAll(selector)) as HTMLElement[];
-      
-      for (const element of elements) {
-        // Check if element is visible and interactable
-        const rect = element.getBoundingClientRect();
-        const isVisible = rect.width > 0 && rect.height > 0 && element.offsetParent !== null;
-        const isEnabled = !element.hasAttribute('disabled');
-        if (isVisible && isEnabled) {
-          editor = element;
-          editorFound = true;
-          console.log("[AutoPoster] Editor found with selector:", selector);
-          break;
-        }
-      }
-
-      if (editorFound) break;
-    }
-    if (!editorFound) {
-      console.log("[AutoPoster] Editor not found, waiting...");
-      await delay(1000);
-    }
-  }
-  if (!editor) {
-    console.error("[AutoPoster] Cannot find editor inside dialog");
-    return false;
-  }
-
-  // Step 1: Attach media FIRST (if any)
-  let mediaAttached = true;
-  if (mediaUrls?.length > 0) {
-    console.log("[AutoPoster] Attaching media first...");
-    mediaAttached = await attachMedia(dialog, mediaUrls);
-
-    if (!mediaAttached) {
-      console.warn("[AutoPoster] Media attachment failed, but continuing with text...");
-    } else {
-      console.log("[AutoPoster] Media attached successfully");
-      // Wait for media processing to complete
-      await delay(1500);
-    }
-  }
-
-  // Step 2: Insert text content (if any)
-  if (content?.trim()) {
-    console.log("[AutoPoster] Inserting text content...");
-    
-    const textInserted = await insertTextIntoContentEditable(editor, content.trim());
-
-    if (!textInserted) {
-      console.error("[AutoPoster] Failed to insert text content");
-      return false;
-    }
-
-    console.log("[AutoPoster] Text content inserted successfully");
-  }
-
-  // Ensure all changes are committed
-  editor.blur();
-  await delay(800);
-
-  // Step 3: Find and click Post button with enhanced detection
-  console.log("[AutoPoster] Looking for Post button...");
-  
-  let postButton: HTMLElement | null = null;
-  let buttonSearchRetries = 25; // Increased retries
-
-  while (!postButton && buttonSearchRetries > 0) {
-    const allButtons = Array.from(
-      dialog.querySelectorAll("div[role='button'], button, [role='button'], input[type='submit']"),
-    );
-
-    // Enhanced button detection logic
-    postButton = allButtons.find((btn) => {
-      const element = btn as HTMLElement;
-      const text = (element.textContent || "").trim().toLowerCase();
-      const ariaLabel = element.getAttribute("aria-label")?.toLowerCase() || "";
-      const ariaDisabled = element.getAttribute("aria-disabled");
-      const disabled = (element as HTMLButtonElement).disabled;
-      
-      // Check if it's a post button
-      const isPostButton = 
-        /^(đăng|post|chia sẻ|share|publish)$/i.test(text) ||
-        ariaLabel.includes("post") ||
-        ariaLabel.includes("đăng") ||
-        ariaLabel.includes("publish");
-      
-      // Check if button is enabled
-      const isEnabled = ariaDisabled !== "true" && !disabled;
-      
-      // Check if button is visible
-      const isVisible = element.offsetParent !== null;
-      
-      // Additional check for button styling (Facebook post buttons often have specific classes)
-      const hasPostButtonStyling = element.className.includes("layerConfirm") ||
-                                  element.closest("[data-testid*='post']") !== null;
-
-      const isValidPostButton = isPostButton && isEnabled && isVisible;
-      
-      console.log("[AutoPoster] Button analysis:", {
-        text: text.substring(0, 20),
-        ariaLabel: ariaLabel.substring(0, 20),
-        ariaDisabled,
-        disabled,
-        isPostButton,
-        isEnabled,
-        isVisible,
-        hasPostButtonStyling,
-        isValidPostButton
-      });
-
-      return isValidPostButton;
-    }) as HTMLElement | null;
-
-    if (!postButton) {
-      console.log(`[AutoPoster] Post button not ready, retrying... (${buttonSearchRetries} left)`);
-      buttonSearchRetries--;
-      await delay(600);
-    }
-  }
-
-  if (!postButton) {
-    console.error("[AutoPoster] Could not find enabled Post button");
-    
-    // Debug: List all buttons found
-    const allButtons = Array.from(dialog.querySelectorAll("div[role='button'], button"));
-    console.log("[AutoPoster] Available buttons:", allButtons.map(btn => ({
-      text: (btn.textContent || "").trim().substring(0, 30),
-      ariaDisabled: (btn as HTMLElement).getAttribute("aria-disabled"),
-      disabled: (btn as HTMLButtonElement).disabled
-    })));
-    
-    return false;
-  }
-
-  // Wait for final validation if button was recently enabled
-  let finalRetries = 15;
-  while (postButton.getAttribute("aria-disabled") === "true" && finalRetries > 0) {
-    console.log("[AutoPoster] Waiting for post button to be fully enabled...");
-    await delay(400);
-    finalRetries--;
-  }
-
-  // Click the post button
-  console.log("[AutoPoster] Clicking Post button...");
-  
-  try {
-    // Multiple click strategies for reliability
-    postButton.focus();
-    await delay(100);
-    
-    postButton.click();
-    
-    // Backup click using mouse event
-    const clickEvent = new MouseEvent('click', {
-      view: window,
-      bubbles: true,
-      cancelable: true
-    });
-    postButton.dispatchEvent(clickEvent);
-    
-    console.log("[AutoPoster] Post button clicked successfully");
-    
-    // Wait for post to be processed
-    await delay(3000);
-    
-    return true;
-
-  } catch (error) {
-    console.error("[AutoPoster] Error clicking post button:", error);
-    return false;
-  }
-}
-*/
+})();
