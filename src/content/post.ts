@@ -1,218 +1,267 @@
 
-import { delay } from "./utils";
-import { waitForCreatePostDialog, insertTextIntoContentEditable } from "./ui";
-// import { attachMedia } from "./media";
+import { delay } from './utils';
+import { waitForCreatePostDialog, insertTextIntoContentEditable } from './ui';
 
+// Types and Interfaces
+interface ImageValidationOptions {
+  minWidth?: number;
+  minHeight?: number;
+}
 
+interface DownloadResponse {
+  success: boolean;
+  data: string;
+  type?: string;
+}
 
-// test paste link 
+// Constants
+const CONSTANTS = {
+  // Timing constants
+  MAX_ATTEMPTS: 30,
+  CLICK_DELAY: 500,
+  PROCESSING_TIMEOUT: 20000,
+  UPLOAD_DELAY: 300,
+  CLICK_COOLDOWN: 3000,
+  MAX_POST_CLICKS: 3,
+  DIALOG_TIMEOUT: 15000,
+  
+  // Image constants
+  MIN_IMAGE_WIDTH: 200,
+  MIN_IMAGE_HEIGHT: 200,
+  TARGET_IMAGE_WIDTH: 400,
+  TARGET_IMAGE_HEIGHT: 400,
+  IMAGE_QUALITY: 0.95,
+  
+  // UI constants
+  VERIFY_ATTEMPTS: 20,
+  LOG_INTERVAL: 5
+} as const;
 
+// Helper Functions
+export function isElementVisible(element: HTMLElement): boolean {
+  if (!element.isConnected || !element.offsetParent || 
+      element.offsetWidth === 0 || element.offsetHeight === 0) {
+    return false;
+  }
 
+  const style = window.getComputedStyle(element);
+  return style.display !== 'none' && 
+         style.visibility !== 'hidden' && 
+         style.opacity !== '0';
+}
 
-async function validateImageSize(blob: Blob, minWidth = 200, minHeight = 200): Promise<boolean> {
-  return new Promise((resolve) => {
+export function toHTMLElement(element: Element | null): HTMLElement | null {
+  return element instanceof HTMLElement ? element : null;
+}
+
+export function normalizeText(str: string): string {
+  return str.trim().toLowerCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+}
+
+export function findSpanByText(container: HTMLElement, text: string): HTMLElement | null {
+  const targetText = normalizeText(text);
+  
+  // First try exact matches
+  const exactMatch = Array.from(container.querySelectorAll('span'))
+    .find(el => normalizeText(el.textContent || '') === targetText);
+  if (exactMatch) return exactMatch as HTMLElement;
+  
+  // Then try contains matches with specific parent class checks
+  const containsMatch = Array.from(container.querySelectorAll('span'))
+    .find(el => {
+      const elText = normalizeText(el.textContent || '');
+      const hasRelevantParent = el.closest('.x1ja2u2z, .xdj266r, .x9f619');
+      return elText.includes(targetText) && hasRelevantParent;
+    });
+  
+  return containsMatch as HTMLElement || null;
+}
+
+// Image Handling Functions
+async function validateImageSize(blob: Blob, options: ImageValidationOptions = {}): Promise<boolean> {
+  const { 
+    minWidth = CONSTANTS.MIN_IMAGE_WIDTH, 
+    minHeight = CONSTANTS.MIN_IMAGE_HEIGHT 
+  } = options;
+  
+  try {
     const url = URL.createObjectURL(blob);
     const img = new Image();
-    img.onload = () => {
-      const valid = img.width >= minWidth && img.height >= minHeight;
-      URL.revokeObjectURL(url);
-      resolve(valid);
-    };
-    img.onerror = () => {
-      URL.revokeObjectURL(url);
-      resolve(false);
-    };
-    img.src = url;
-  });
-}
-
-async function resizeImage(blob: Blob, targetW = 400, targetH = 400): Promise<Blob> {
-  const img = await createImageBitmap(blob);
-  const canvas = document.createElement("canvas");
-  canvas.width = targetW;
-  canvas.height = targetH;
-  const ctx = canvas.getContext("2d");
-  ctx?.drawImage(img, 0, 0, targetW, targetH);
-  return new Promise((resolve) => {
-    canvas.toBlob((newBlob) => resolve(newBlob!), blob.type);
-  });
-}
-
-
-function insertUrlAsText(editor: HTMLElement, url: string) {
-  editor.focus();
-  editor.innerHTML = "";
-
-  try {
-   
-    const success = document.execCommand("insertText", false, url);
-    if (!success) {
-      const textNode = document.createTextNode(url);
-      editor.appendChild(textNode);
-      editor.dispatchEvent(new InputEvent("input", { bubbles: true }));
-    } else {
-      editor.dispatchEvent(new InputEvent("input", { bubbles: true }));
-    }
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  } catch (err) {
-    const textNode = document.createTextNode(url);
-    editor.appendChild(textNode);
-    editor.dispatchEvent(new InputEvent("input", { bubbles: true }));
+    
+    const valid = await new Promise<boolean>((resolve) => {
+      img.onload = () => resolve(img.width >= minWidth && img.height >= minHeight);
+      img.onerror = () => resolve(false);
+      img.src = url;
+    });
+    
+    URL.revokeObjectURL(url);
+    return valid;
+  } catch (error) {
+    console.error('[AutoPoster] Image validation error:', error);
+    return false;
   }
 }
-async function downloadMedia(url: string): Promise<Blob | null> {
-  return new Promise((resolve) => {
-    chrome.runtime.sendMessage({ type: "DOWNLOAD_MEDIA", url }, (res) => {
-      if (res?.success) {
-        const arr = res.data.split(",");
-        const mime = res.type || "application/octet-stream";
-        const bstr = atob(arr[1]);
-        let n = bstr.length;
-        const u8arr = new Uint8Array(n);
-        while (n--) u8arr[n] = bstr.charCodeAt(n);
-        resolve(new Blob([u8arr], { type: mime }));
-      } else {
-        resolve(null);
-      }
+
+async function resizeImage(
+  blob: Blob, 
+  targetW = CONSTANTS.TARGET_IMAGE_WIDTH, 
+  targetH = CONSTANTS.TARGET_IMAGE_HEIGHT
+): Promise<Blob> {
+  try {
+    const img = await createImageBitmap(blob);
+    const canvas = document.createElement('canvas');
+    canvas.width = targetW;
+    canvas.height = targetH;
+    
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error('Failed to get canvas context');
+    
+    ctx.drawImage(img, 0, 0, targetW, targetH);
+    return await new Promise<Blob>((resolve, reject) => {
+      canvas.toBlob(
+        (newBlob) => newBlob ? resolve(newBlob) : reject(new Error('Failed to create blob')),
+        'image/jpeg',
+        CONSTANTS.IMAGE_QUALITY
+      );
     });
-  });
+  } catch (error) {
+    console.error('[AutoPoster] Image resize error:', error);
+    throw error;
+  }
 }
 
-// ====== Upload media vào Facebook dialog ======
-async function uploadMedia(dialog: HTMLElement, mediaUrls: string[]): Promise<boolean> {
+// Media Handling Functions
+async function downloadMedia(url: string): Promise<Blob | null> {
   try {
-    const fileInput = dialog.querySelector<HTMLInputElement>("input[type='file'][multiple]");
-    if (!fileInput) {
-      console.error("[AutoPoster] Không tìm thấy input file trong dialog");
-      return false;
+    const response = await new Promise<DownloadResponse>((resolve) => {
+      chrome.runtime.sendMessage({ type: 'DOWNLOAD_MEDIA', url }, resolve);
+    });
+
+    if (!response?.success) {
+      console.warn('[AutoPoster] Media download failed:', url);
+      return null;
     }
 
+    const [, base64Data] = response.data.split(',');
+    const bytes = Uint8Array.from(atob(base64Data), c => c.charCodeAt(0));
+    return new Blob([bytes], { type: response.type || 'application/octet-stream' });
+  } catch (error) {
+    console.error('[AutoPoster] Media download error:', url, error);
+    return null;
+  }
+}
+
+async function uploadMedia(dialog: HTMLElement, mediaUrls: string[]): Promise<boolean> {
+  const fileInput = dialog.querySelector<HTMLInputElement>("input[type='file'][multiple]");
+  if (!fileInput) {
+    console.error("[AutoPoster] File input not found in dialog");
+    return false;
+  }
+
+  try {
     const dataTransfer = new DataTransfer();
+    let successCount = 0;
 
     for (const url of mediaUrls) {
       const blob = await downloadMedia(url);
-      if (!blob) {
-        console.warn("[AutoPoster] Không tải được media:", url);
-        continue;
-      }
+      if (!blob) continue;
 
-      let finalBlob = blob;
+      const finalBlob = !(await validateImageSize(blob)) 
+        ? await resizeImage(blob)
+        : blob;
 
-      const ok = await validateImageSize(blob);
-      if (!ok) {
-        console.warn("[AutoPoster] Image too small, resizing:", url);
-        finalBlob = await resizeImage(blob, 400, 400);
-      }
+      const ext = blob.type.includes('gif') ? 'gif' : 'jpg';
+      dataTransfer.items.add(
+        new File([finalBlob], `upload_${successCount}.${ext}`, { type: blob.type })
+      );
+      successCount++;
+      await delay(CONSTANTS.UPLOAD_DELAY);
+    }
 
-      const ext = blob.type.includes("gif") ? "gif" : "jpg";
-      const file = new File([finalBlob], `upload.${ext}`, { type: blob.type });
-
-      dataTransfer.items.add(file);
-      await delay(500); // cho FB xử lý dần
+    if (successCount === 0) {
+      console.warn("[AutoPoster] No media files were successfully processed");
+      return false;
     }
 
     fileInput.files = dataTransfer.files;
-    fileInput.dispatchEvent(new Event("change", { bubbles: true }));
-
-    console.log("[AutoPoster] Media uploaded:", mediaUrls);
+    fileInput.dispatchEvent(new Event('change', { bubbles: true }));
+    
+    console.log(`[AutoPoster] ${successCount}/${mediaUrls.length} media files uploaded`);
     return true;
-  } catch (err) {
-    console.error("[AutoPoster] uploadMedia error:", err);
+  } catch (error) {
+    console.error("[AutoPoster] Media upload error:", error);
     return false;
   }
 }
 
-// Wrap the implementation in an IIFE to prevent global variable conflicts
-export const postContentToFacebook = (() => {
-  // Internal module state// 5 seconds between attempts
-  
-  return async function(content: string, mediaUrls: string[] = []): Promise<boolean> {
-  console.log("[AutoPoster] Waiting for Create Post dialog...", {
-    now: new Date().toISOString(),
-    url: location.href,
-    contentPreview: (content || "").slice(0, 80),
-    mediaCount: mediaUrls?.length || 0,
-  });
-  const dialog = await waitForCreatePostDialog(20000);
-  if (!dialog) {
-    // Enhanced diagnostics to help debug why dialog not found
-    const allDialogs = Array.from(document.querySelectorAll<HTMLElement>("[role='dialog']"));
-    const allComposers = Array.from(document.querySelectorAll<HTMLElement>("[data-pagelet*='Composer'], [data-testid*='composer'], [data-testid*='post']"));
-    const allContentEditable = Array.from(document.querySelectorAll<HTMLElement>("[contenteditable='true']"));
-    
-    console.warn("[AutoPoster][postContentToFacebook] No dialog after wait. Enhanced diagnostics:", {
-      url: location.href,
-      dialogs: allDialogs.length,
-      composers: allComposers.length,
-      contentEditable: allContentEditable.length,
-      dialogDetails: allDialogs.map((d, i) => ({
-        index: i,
-        text: (d.textContent || "").trim().slice(0, 100),
-        ariaLabel: d.getAttribute("aria-label") || "",
-        dataTestId: d.getAttribute("data-testid") || "",
-        visible: d.offsetParent !== null,
-        classes: d.className.slice(0, 100)
-      })),
-      composerDetails: allComposers.map((c, i) => ({
-        index: i,
-        text: (c.textContent || "").trim().slice(0, 100),
-        dataPagelet: c.getAttribute("data-pagelet") || "",
-        dataTestId: c.getAttribute("data-testid") || "",
-        visible: c.offsetParent !== null
-      })),
-      bodyHasComposer: !!document.querySelector("[data-pagelet*='FeedComposer']"),
-      readyState: document.readyState,
-      visibility: document.visibilityState
-    });
-    return false;
-  }
+// Text Handling Functions
+function insertUrlAsText(editor: HTMLElement, url: string): void {
+  editor.focus();
+  editor.innerHTML = '';
 
-  // Tìm editor (supports dialog or inline composer)
-  const editorSelectors = [
-    "div[role='textbox'][contenteditable='true']",
-    "div[contenteditable='true'][data-lexical-editor='true']",
-    "div[contenteditable='true'][data-text='true']",
-    "div[contenteditable='true']",
-    "[contenteditable='true']",
-  ];
-  let editor: HTMLElement | null = null;
-  for (const sel of editorSelectors) {
-    const found = dialog.querySelector(sel) as HTMLElement | null;
-    if (found) { editor = found; break; }
-  }
-  if (!editor) {
-    console.error("[AutoPoster] Không tìm thấy editor trong dialog");
-    const debug = Array.from(dialog.querySelectorAll("[contenteditable]")) as HTMLElement[];
-    console.log("[AutoPoster] contenteditable candidates:", debug.map((e) => ({
-      tag: e.tagName,
-      role: e.getAttribute("role"),
-      dataLexical: e.getAttribute("data-lexical-editor"),
-      visible: e.offsetParent !== null,
-      text: (e.textContent || "").trim().slice(0, 40),
-    })));
-    return false;
-  }
-
-  // Nếu content là URL -> paste, nếu không thì insert text
-  const isUrl = /^https?:\/\/\S+$/.test(content.trim());
-  if (isUrl) {
-    insertUrlAsText(editor, content.trim());
-  } else {
-    insertTextIntoContentEditable(editor, content);
-  }
-
-  // Upload media (một lần, không lặp thừa)
-  if (mediaUrls && mediaUrls.length > 0) {
-    console.log("[AutoPoster] Bắt đầu upload media:", mediaUrls.length);
-    const ok = await uploadMedia(dialog, mediaUrls);
-    if (!ok) {
-      console.warn("[AutoPoster] Upload media thất bại, tiếp tục đăng chỉ văn bản");
-    } else {
-      await delay(1500);
+  try {
+    if (!document.execCommand('insertText', false, url)) {
+      editor.textContent = url;
     }
+    editor.dispatchEvent(new InputEvent('input', { bubbles: true }));
+  } catch {
+    editor.textContent = url;
+    editor.dispatchEvent(new InputEvent('input', { bubbles: true }));
   }
+}
 
-  await delay(2000); // đợi preview hiện
+export const postContentToFacebook = (() => {
+  return async function(content: string, mediaUrls: string[] = []): Promise<boolean> {
+    console.log("[AutoPoster] Initiating post:", {
+      contentLength: content?.length,
+      mediaCount: mediaUrls?.length,
+      url: location.href
+    });
+
+    // Wait for and validate dialog
+    const dialog = await waitForCreatePostDialog(CONSTANTS.PROCESSING_TIMEOUT);
+    if (!dialog) {
+      console.error("[AutoPoster] Create Post dialog not found", {
+        dialogs: document.querySelectorAll("[role='dialog']").length,
+        composers: document.querySelectorAll("[data-pagelet*='Composer']").length,
+        readyState: document.readyState
+      });
+      return false;
+    }
+
+    // Find editor with prioritized selectors
+    const editor = [
+      "div[role='textbox'][contenteditable='true']",
+      "div[contenteditable='true'][data-lexical-editor='true']",
+      "div[contenteditable='true'][data-text='true']",
+      "div[contenteditable='true']"
+    ].reduce<HTMLElement|null>((found, selector) => 
+      found || dialog.querySelector<HTMLElement>(selector), null);
+
+    if (!editor) {
+      console.error("[AutoPoster] Editor not found in dialog");
+      return false;
+    }
+
+    // Insert content
+    const trimmedContent = content.trim();
+    if (/^https?:\/\/\S+$/.test(trimmedContent)) {
+      insertUrlAsText(editor, trimmedContent);
+    } else {
+      insertTextIntoContentEditable(editor, content);
+    }
+    await delay(CONSTANTS.CLICK_DELAY);
+
+    // Handle media uploads if present
+    if (mediaUrls.length > 0) {
+      const uploadSuccess = await uploadMedia(dialog, mediaUrls);
+      if (!uploadSuccess) {
+        console.warn("[AutoPoster] Media upload failed, continuing with text only");
+      }
+      // Wait for preview/upload processing
+      await delay(CONSTANTS.CLICK_DELAY * 2);
+    }
 
   // Enhanced post button detection with new scoring system
   interface ScoredButton {
@@ -224,35 +273,13 @@ export const postContentToFacebook = (() => {
   let postBtn: HTMLElement | undefined = undefined;
   const maxAttempts = 30;
 
-  function findSpanByText(container: HTMLElement, text: string): HTMLElement | null {
-    // Enhanced text matching with fuzzy matching for special characters
-    const normalizeText = (str: string) => str.trim().toLowerCase()
-      .normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-    
-    const targetText = normalizeText(text);
-    
-    // First try exact matches
-    const exactMatch = Array.from(container.querySelectorAll('span'))
-      .find(el => normalizeText(el.textContent || '') === targetText);
-    if (exactMatch) return exactMatch as HTMLElement;
-    
-    // Then try contains matches with specific parent class checks
-    const containsMatch = Array.from(container.querySelectorAll('span'))
-      .find(el => {
-        const elText = normalizeText(el.textContent || '');
-        const hasRelevantParent = el.closest('.x1ja2u2z, .xdj266r, .x9f619');
-        return elText.includes(targetText) && hasRelevantParent;
-      });
-    
-    return containsMatch as HTMLElement || null;
-  }
-
+  // Use the previously defined helper functions: normalizeText, isElementVisible, toHTMLElement
+  
   function scoreButton(btn: HTMLElement): ScoredButton | null {
-    // Enhanced visibility and state validation
-    if (!btn.isConnected || !btn.offsetParent || btn.offsetWidth === 0 || btn.offsetHeight === 0) return null;
+    // Use visibility helper function
+    if (!isElementVisible(btn)) return null;
 
     const style = window.getComputedStyle(btn);
-    if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return null;
 
     // Extended disabled state checks
     const isDisabled = btn.getAttribute('aria-disabled') === 'true' || 
@@ -394,18 +421,28 @@ export const postContentToFacebook = (() => {
           el instanceof HTMLElement ? el : null;
         
         // Then try scored buttons as fallback
-        const nextButton = nextSpan ? { 
-          element: toHTMLElement(nextSpan.closest('[role="button"]')) || 
-                  toHTMLElement(nextSpan.parentElement), 
-          score: 100, 
-          type: 'next' as const
+        const nextElement = nextSpan && (
+          toHTMLElement(nextSpan.closest('[role="button"]')) || 
+          toHTMLElement(nextSpan.parentElement)
+        );
+        
+        const postElement = postSpan && (
+          toHTMLElement(postSpan.closest('[role="button"]')) || 
+          toHTMLElement(postSpan.parentElement)
+        );
+
+        const nextButton = nextElement ? {
+          element: nextElement,
+          score: 100,
+          type: 'next' as const,
+          description: 'Next button'
         } : scoredButtons.find(b => b.type === 'next' && b.score >= 60);
                           
-        const postButton = postSpan ? { 
-          element: toHTMLElement(postSpan.closest('[role="button"]')) || 
-                  toHTMLElement(postSpan.parentElement), 
-          score: 100, 
-          type: 'post' as const
+        const postButton = postElement ? {
+          element: postElement,
+          score: 100,
+          type: 'post' as const,
+          description: 'Post button'
         } : scoredButtons.find(b => b.type === 'post' && b.score >= 80);      if (nextButton?.element) {
         postBtn = nextButton.element;
         console.log("[AutoPoster] Found Next button:", {
@@ -487,102 +524,51 @@ export const postContentToFacebook = (() => {
     if (rect.top < 0 || rect.bottom > window.innerHeight) {
       postBtn.scrollIntoView({ behavior: 'smooth', block: 'center' });
       await delay(500);
-    }    // 2. Enhanced click handling for specific button structure
-    let actualClickTarget = postBtn;
-    
-    // If we found the outer container, look for the clickable inner element
-    if (postBtn.matches('div.x1ja2u2z')) {
-      const innerButton = postBtn.querySelector('div[role="none"]') as HTMLElement;
-      if (innerButton) {
-        actualClickTarget = innerButton;
-      }
-    }
-    
-    // Focus the actual target
-    try {
-      actualClickTarget.focus();
-    } catch (err) {
-      console.warn("[AutoPoster] Focus failed, continuing...", err);
-    }
-    await delay(100);
-
-    // 3. Try multiple click methods with enhanced targeting
+    }    // Enhanced click handling for specific button structure
     let clicked = false;
-
-    // Method 1: Enhanced hierarchical click handling with precise targeting
-    try {
-      let clicked = false;
+    
+    // Try different button target strategies in order of preference
+    const clickTargets = [
+      // 1. Exact text span
+      postBtn.querySelector<HTMLElement>('span.x1lliihq.x6ikm8r.x10wlt62.x1n2onr6.xlyipyv.xuxw1ft'),
       
-      // 1. Try clicking the exact text span first
-      const textSpan = actualClickTarget.querySelector('span.x1lliihq.x6ikm8r.x10wlt62.x1n2onr6.xlyipyv.xuxw1ft');
-      if (textSpan) {
-        console.log("[AutoPoster] Found and clicking text span");
-        const spanEl = textSpan as HTMLElement;
-        spanEl.focus();
-        await delay(100);
-        spanEl.click();
+      // 2. Parent span
+      toHTMLElement(postBtn.closest('span.x193iq5w.xeuugli.x13faqbe.x1vvkbs')),
+      
+      // 3. Button container
+      toHTMLElement(postBtn.querySelector('div[role="none"]')),
+      
+      // 4. Main wrapper
+      toHTMLElement(postBtn.closest('div.x1ja2u2z.x78zum5.x2lah0s.x1n2onr6')),
+      
+      // 5. Original target
+      postBtn
+    ];
+    
+    // Try each target until one succeeds
+    for (const target of clickTargets.filter(Boolean)) {
+      if (!isElementVisible(target!)) continue;
+      
+      try {
+        target!.focus();
+        await delay(CONSTANTS.CLICK_DELAY / 5);
+        target!.click();
         clicked = true;
+        console.log("[AutoPoster] Successfully clicked:", target!.tagName, target!.className);
+        break;
+      } catch (err) {
+        console.warn("[AutoPoster] Click failed for target:", target!.tagName, err);
+        continue;
       }
-      
-      // 2. Try the immediate parent span if direct span click didn't work
-      if (!clicked) {
-        const parentSpan = textSpan?.parentElement;
-        if (parentSpan && parentSpan.matches('span.x193iq5w.xeuugli.x13faqbe.x1vvkbs.x1xmvt09.x1lliihq.x1s928wv.xhkezso.x1gmr53x.x1cpjm7i.x1fgarty.x1943h6x.xudqn12.x3x7a5m.x6prxxf.xvq8zen.x1s688f.xtk6v10')) {
-          console.log("[AutoPoster] Clicking parent span");
-          const el = parentSpan as HTMLElement;
-          el.focus();
-          await delay(100);
-          el.click();
-          clicked = true;
-        }
-      }
-      
-      // 3. Try the button container with role="none"
-      if (!clicked) {
-        const buttonContainer = actualClickTarget.querySelector('div.x9f619.x1n2onr6.x1ja2u2z.x193iq5w.xeuugli.x6s0dn4.x78zum5.x2lah0s.xsqbvy7.xb9jzoj[role="none"]');
-        if (buttonContainer) {
-          console.log("[AutoPoster] Clicking button container");
-          const el = buttonContainer as HTMLElement;
-          el.focus();
-          await delay(100);
-          el.click();
-          clicked = true;
-        }
-      }
-      
-      // 4. Try clicking the main wrapper as a fallback
-      if (!clicked) {
-        const mainWrapper = actualClickTarget.closest('div.x1ja2u2z.x78zum5.x2lah0s.x1n2onr6.xl56j7k');
-        if (mainWrapper) {
-          console.log("[AutoPoster] Clicking main wrapper");
-          const el = mainWrapper as HTMLElement;
-          el.focus();
-          await delay(100);
-          el.click();
-          clicked = true;
-        }
-      }
-
-      // 5. Try direct click as last resort
-      if (!clicked) {
-        console.log("[AutoPoster] Direct click on target");
-        actualClickTarget.focus();
-        await delay(100);
-        actualClickTarget.click();
-        clicked = true;
-      }
-
-      if (!clicked) {
-        throw new Error("No clickable element found");
-      }
-    } catch (err) {
-      console.warn("[AutoPoster] Click sequence failed:", err);
-      clicked = false;
+    }
+    
+    if (!clicked) {
+      console.warn("[AutoPoster] All click attempts failed");
     }
 
     // Method 2: Simulated mouse events with precise targeting
     if (!clicked) {
-      const rect = actualClickTarget.getBoundingClientRect();
+      const rect = postBtn.getBoundingClientRect();
       const centerX = rect.left + rect.width / 2;
       const centerY = rect.top + rect.height / 2;
 
