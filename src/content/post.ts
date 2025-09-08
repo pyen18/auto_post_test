@@ -50,6 +50,286 @@ export function isElementVisible(element: HTMLElement): boolean {
          style.opacity !== '0';
 }
 
+/**
+ * Enhanced function to reliably click the "Đăng" (Post) button
+ * Uses MutationObserver, retry mechanism, and safe selectors
+ */
+export async function clickPostButton(container: HTMLElement = document.body): Promise<boolean> {
+  console.log("[AutoPoster] Starting enhanced post button click sequence");
+  
+  const MAX_RETRIES = 5;
+  const RETRY_DELAY = 1000;
+  const MUTATION_TIMEOUT = 10000;
+  
+  // Safe selector function using role and text content
+  function findPostButton(): HTMLElement | null {
+    // Strategy 1: Find by role=button and exact text "Đăng"
+    const buttons = Array.from(container.querySelectorAll<HTMLElement>('[role="button"]'));
+    
+    for (const button of buttons) {
+      if (!isElementVisible(button)) continue;
+      
+      // Check if button or its children contain "Đăng" text
+      const buttonText = button.textContent?.trim();
+      const spans = button.querySelectorAll('span');
+      
+      // Check button text directly
+      if (buttonText === 'Đăng') {
+        return button;
+      }
+      
+      // Check spans within button
+      for (const span of spans) {
+        if (span.textContent?.trim() === 'Đăng') {
+          return button;
+        }
+      }
+      
+      // Check aria-label for Vietnamese and English
+      const ariaLabel = button.getAttribute('aria-label');
+      if (ariaLabel && (ariaLabel.includes('Đăng') || ariaLabel.toLowerCase().includes('post'))) {
+        return button;
+      }
+    }
+    
+    // Strategy 2: Look for submit buttons in forms
+    const submitButtons = Array.from(container.querySelectorAll<HTMLElement>('button[type="submit"]'));
+    for (const button of submitButtons) {
+      if (isElementVisible(button) && button.textContent?.trim() === 'Đăng') {
+        return button;
+      }
+    }
+    
+    // Strategy 3: Look for buttons with specific Facebook classes and "Đăng" text
+    const fbButtons = Array.from(container.querySelectorAll<HTMLElement>('div[class*="x1i10hfl"], div[class*="xjbqb8w"]'));
+    for (const button of fbButtons) {
+      if (isElementVisible(button) && button.getAttribute('role') === 'button') {
+        const buttonText = button.textContent?.trim();
+        if (buttonText === 'Đăng') {
+          return button;
+        }
+      }
+    }
+    
+    return null;
+  }
+  
+  // Wait for button to be present and enabled using MutationObserver
+  function waitForPostButton(): Promise<HTMLElement> {
+    return new Promise((resolve, reject) => {
+      // eslint-disable-next-line prefer-const
+      let observer: MutationObserver;
+      
+      const timeout = setTimeout(() => {
+        if (observer) observer.disconnect();
+        reject(new Error('Post button not found within timeout'));
+      }, MUTATION_TIMEOUT);
+      
+      const checkButton = () => {
+        const button = findPostButton();
+        if (button) {
+          // Check if button is enabled
+          const isDisabled = button.getAttribute('aria-disabled') === 'true' ||
+                           button.hasAttribute('disabled') ||
+                           button.classList.contains('disabled');
+          
+          if (!isDisabled) {
+            clearTimeout(timeout);
+            if (observer) observer.disconnect();
+            console.log("[AutoPoster] Post button found and enabled");
+            resolve(button);
+            return true;
+          }
+        }
+        return false;
+      };
+      
+      // Check immediately
+      if (checkButton()) return;
+      
+      // Set up MutationObserver to watch for changes
+      observer = new MutationObserver(() => {
+        checkButton();
+      });
+      
+      observer.observe(container, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ['aria-disabled', 'disabled', 'class']
+      });
+    });
+  }
+  
+  // Enhanced click function with multiple strategies
+  async function performClick(button: HTMLElement, retryCount: number): Promise<boolean> {
+    try {
+      console.log(`[AutoPoster] Attempting to click post button (attempt ${retryCount + 1})`);
+      
+      // Step 1: Focus the button
+      button.focus();
+      await delay(100);
+      
+      // Step 2: Scroll into view
+      button.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      await delay(300);
+      
+      // Step 3: Verify button is still visible and enabled
+      if (!isElementVisible(button)) {
+        console.warn("[AutoPoster] Button became invisible after scroll");
+        return false;
+      }
+      
+      const isDisabled = button.getAttribute('aria-disabled') === 'true' ||
+                        button.hasAttribute('disabled') ||
+                        button.classList.contains('disabled');
+      
+      if (isDisabled) {
+        console.warn("[AutoPoster] Button is disabled");
+        return false;
+      }
+      
+      // Step 4: Multiple click strategies with improved success detection
+      const clickStrategies = [
+        // Strategy 1: Direct click
+        () => {
+          button.click();
+        },
+        
+        // Strategy 2: Click on span child if exists
+        () => {
+          const span = button.querySelector('span');
+          if (span && span.textContent?.trim() === 'Đăng') {
+            (span as HTMLElement).click();
+          } else {
+            throw new Error('No valid span found');
+          }
+        },
+        
+        // Strategy 3: Simulated mouse events
+        () => {
+          const rect = button.getBoundingClientRect();
+          const centerX = rect.left + rect.width / 2;
+          const centerY = rect.top + rect.height / 2;
+          
+          const mouseEvents = [
+            new MouseEvent('mousedown', { bubbles: true, cancelable: true, clientX: centerX, clientY: centerY }),
+            new MouseEvent('mouseup', { bubbles: true, cancelable: true, clientX: centerX, clientY: centerY }),
+            new MouseEvent('click', { bubbles: true, cancelable: true, clientX: centerX, clientY: centerY })
+          ];
+          
+          mouseEvents.forEach(event => button.dispatchEvent(event));
+        },
+        
+        // Strategy 4: Keyboard activation
+        () => {
+          button.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+          button.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', bubbles: true }));
+        }
+      ];
+      
+      // Try each strategy with improved success detection
+      for (let i = 0; i < clickStrategies.length; i++) {
+        try {
+          console.log(`[AutoPoster] Trying click strategy ${i + 1}`);
+          clickStrategies[i]();
+          
+          // Wait for potential DOM changes
+          await delay(800);
+          
+          // Multiple success indicators
+          const successChecks = [
+            // Check 1: Dialog closed completely
+            () => !document.querySelector('[role="dialog"]'),
+            
+            // Check 2: Post button disappeared
+            () => !findPostButton(),
+            
+            // Check 3: Success message or redirect
+            () => document.querySelector('[data-testid="post-success"]') || 
+                  window.location.href.includes('/posts/') ||
+                  document.querySelector('.success, .posted'),
+            
+            // Check 4: Button state changed to loading or disabled
+            () => {
+              const currentButton = findPostButton();
+              return currentButton && (
+                currentButton.getAttribute('aria-disabled') === 'true' ||
+                currentButton.classList.contains('loading') ||
+                currentButton.querySelector('.loading, .spinner')
+              );
+            }
+          ];
+          
+          // Check if any success indicator is true
+          const isSuccessful = successChecks.some(check => {
+            try {
+              return check();
+            } catch {
+              return false;
+            }
+          });
+          
+          if (isSuccessful) {
+            console.log(`[AutoPoster] Click strategy ${i + 1} successful`);
+            return true;
+          }
+          
+        } catch (error) {
+          console.warn(`[AutoPoster] Click strategy ${i + 1} failed:`, error);
+          continue;
+        }
+      }
+      
+      return false;
+      
+    } catch (error) {
+      console.error("[AutoPoster] Error during click attempt:", error);
+      return false;
+    }
+  }
+  
+  // Main retry loop
+  for (let retryCount = 0; retryCount < MAX_RETRIES; retryCount++) {
+    try {
+      console.log(`[AutoPoster] Post button click attempt ${retryCount + 1}/${MAX_RETRIES}`);
+      
+      // Wait for button to be available
+      const button = await waitForPostButton();
+      console.log("[AutoPoster] Post button detected:", {
+        text: button.textContent?.trim(),
+        ariaLabel: button.getAttribute('aria-label'),
+        tagName: button.tagName,
+        classes: button.className.slice(0, 100)
+      });
+      
+      // Attempt to click
+      const clickSuccess = await performClick(button, retryCount);
+      
+      if (clickSuccess) {
+        console.log("[AutoPoster] Post button clicked successfully");
+        return true;
+      }
+      
+      // If not successful and not the last retry, wait before trying again
+      if (retryCount < MAX_RETRIES - 1) {
+        console.log(`[AutoPoster] Click failed, retrying in ${RETRY_DELAY}ms...`);
+        await delay(RETRY_DELAY);
+      }
+      
+    } catch (error) {
+      console.error(`[AutoPoster] Retry ${retryCount + 1} failed:`, error);
+      
+      if (retryCount < MAX_RETRIES - 1) {
+        await delay(RETRY_DELAY);
+      }
+    }
+  }
+  
+  console.error("[AutoPoster] Failed to click post button after all retries");
+  return false;
+}
+
 export function toHTMLElement(element: Element | null): HTMLElement | null {
   return element instanceof HTMLElement ? element : null;
 }
@@ -211,8 +491,8 @@ function insertUrlAsText(editor: HTMLElement, url: string): void {
   }
 }
 
-export const postContentToFacebook = (() => {
-  return async function(content: string, mediaUrls: string[] = []): Promise<boolean> {
+export async function postContentToFacebook(content: string, mediaUrls: string[] = []): Promise<boolean> {
+  try {
     console.log("[AutoPoster] Initiating post:", {
       contentLength: content?.length,
       mediaCount: mediaUrls?.length,
@@ -263,484 +543,34 @@ export const postContentToFacebook = (() => {
       await delay(CONSTANTS.CLICK_DELAY * 2);
     }
 
-  // Enhanced post button detection with new scoring system
-  interface ScoredButton {
-    element: HTMLElement;
-    score: number;
-    type: 'post' | 'next' | 'unknown';
-  }
-
-  let postBtn: HTMLElement | undefined = undefined;
-  const maxAttempts = 30;
-
-  // Use the previously defined helper functions: normalizeText, isElementVisible, toHTMLElement
-  
-  function scoreButton(btn: HTMLElement): ScoredButton | null {
-    // Use visibility helper function
-    if (!isElementVisible(btn)) return null;
-
-    const style = window.getComputedStyle(btn);
-
-    // Extended disabled state checks
-    const isDisabled = btn.getAttribute('aria-disabled') === 'true' || 
-                      btn.classList.contains('disabled') ||
-                      btn.hasAttribute('disabled') ||
-                      style.opacity === '0.4' ||
-                      style.cursor === 'not-allowed';
-    if (isDisabled) return null;
-
-    // Check for suspicious classes/attributes that might indicate non-interactive elements
-    const suspiciousClasses = ['x1h6gzvc', 'x1lq5wgf', 'xgqcy7u', 'x30kzoy'];
-    if (suspiciousClasses.some(c => btn.classList.contains(c))) return null;
-
-    // Collect all text content
-    const text = (btn.textContent || '').trim().toLowerCase();
-    const ariaLabel = (btn.getAttribute('aria-label') || '').toLowerCase();
-    const testId = (btn.getAttribute('data-testid') || '').toLowerCase();
-    const role = btn.getAttribute('role') || '';
-
-    let score = 0;
-    let type: 'post' | 'next' | 'unknown' = 'unknown';
-
-    // Enhanced text scoring with more comprehensive matching
-    if (text === 'đăng' || text === 'post') {
-      score += 100;
-      type = 'post';
-    }
-    if (text === 'tiếp' || text === 'next') {
-      score += 80;
-      type = 'next';
-    }
-    if (/^(đăng|post|share|chia sẻ|publish)$/.test(text)) {
-      score += 90;
-      type = 'post';
-    }
-
-    // Check aria labels
-    if (ariaLabel.includes('đăng') || ariaLabel.includes('post')) {
-      score += 60;
-      if (type === 'unknown') type = 'post';
-    }
-    if (ariaLabel.includes('next') || ariaLabel.includes('tiếp')) {
-      score += 50;
-      if (type === 'unknown') type = 'next';
-    }
-
-    // Check data-testid
-    if (testId.includes('post-button') || testId.includes('share-button')) {
-      score += 40;
-      if (type === 'unknown') type = 'post';
-    }
-    if (testId.includes('next-button')) {
-      score += 30;
-      if (type === 'unknown') type = 'next';
-    }
-
-    // Special Facebook elements
-    const targetSpan = btn.querySelector('span.x1lliihq.x6ikm8r.x10wlt62.x1n2onr6.xlyipyv.xuxw1ft');
-    if (targetSpan?.textContent?.trim() === 'Đăng') {
-      score += 150;
-      type = 'post';
-    }
-
-    // Facebook-specific classes
-    const fbClasses = [
-      'x1ja2u2z', 'xdj266r', 'x9f619', 'x1n2onr6', 
-      'x78zum5', 'x2lah0s', 'xsqbvy7', 'xb9jzoj'
-    ];
-    const matchingClasses = fbClasses.filter(c => btn.classList.contains(c));
-    if (matchingClasses.length >= 3) score += matchingClasses.length * 10;
-
-    // Structure checks
-    if (role === 'button') score += 30;
-    if (btn.tagName === 'BUTTON') score += 20;
-    if (btn.matches('[type="submit"]')) score += 40;
-
-    // Penalize suspicious elements
-    if (text.includes('cancel') || text.includes('hủy')) score -= 100;
-    if (text.includes('close') || text.includes('đóng')) score -= 100;
-
-    // Validate the final score
-    if (score <= 0) return null;
-
-    return {
-      element: btn,
-      score,
-      type
-    };
-  }
-
-  for (let attempt = 1; attempt <= maxAttempts && !postBtn; attempt++) {
-    // Get all potential clickable elements
-    const buttonSelectors = [
-      // Standard buttons
-      'button[type="submit"]',
-      'div[role="button"]',
-      '[role="button"]',
-      // Facebook-specific selectors
-      'div.x1ja2u2z span',
-      'div.xdj266r span',
-      'div.x9f619[role="none"]',
-      'div.x1n2onr6[role="none"]',
-      // Aria labeled buttons
-      '[aria-label*="post" i]',
-      '[aria-label*="đăng" i]',
-      '[aria-label*="share" i]',
-      // Common Facebook button classes
-      'div.xjbqb8w',
-      'div.x1i10hfl',
-      'div.x1qjc9v5',
-      // Specific spans
-      'span.x1lliihq.x6ikm8r.x10wlt62.x1n2onr6.xlyipyv.xuxw1ft'
-    ];
-
-    const candidates = buttonSelectors.reduce<HTMLElement[]>((acc, selector) => {
-      try {
-        const elements = Array.from(dialog.querySelectorAll<HTMLElement>(selector));
-        return acc.concat(elements);
-      } catch (error) {
-        console.warn("[AutoPoster] Invalid selector:", selector, error);
-        return acc;
-      }
-    }, []);
-
-    // Score and filter candidates
-    const scoredButtons = candidates
-      .map(btn => scoreButton(btn))
-      .filter((btn): btn is ScoredButton => btn !== null)
-      .sort((a, b) => b.score - a.score);
-
-    // Handle button selection based on context
-    if (scoredButtons.length > 0) {
-        // First try direct text matching
-        const nextSpan = findSpanByText(dialog, 'Tiếp');
-        const postSpan = findSpanByText(dialog, 'Đăng');
-        
-        // Helper to safely get HTMLElement from Element
-        const toHTMLElement = (el: Element | null): HTMLElement | null => 
-          el instanceof HTMLElement ? el : null;
-        
-        // Then try scored buttons as fallback
-        const nextElement = nextSpan && (
-          toHTMLElement(nextSpan.closest('[role="button"]')) || 
-          toHTMLElement(nextSpan.parentElement)
-        );
-        
-        const postElement = postSpan && (
-          toHTMLElement(postSpan.closest('[role="button"]')) || 
-          toHTMLElement(postSpan.parentElement)
-        );
-
-        const nextButton = nextElement ? {
-          element: nextElement,
-          score: 100,
-          type: 'next' as const,
-          description: 'Next button'
-        } : scoredButtons.find(b => b.type === 'next' && b.score >= 60);
-                          
-        const postButton = postElement ? {
-          element: postElement,
-          score: 100,
-          type: 'post' as const,
-          description: 'Post button'
-        } : scoredButtons.find(b => b.type === 'post' && b.score >= 80);      if (nextButton?.element) {
-        postBtn = nextButton.element;
-        console.log("[AutoPoster] Found Next button:", {
-          score: nextButton.score,
-          text: postBtn?.textContent?.trim() || ''
-        });
-      } else if (postButton?.element) {
-        postBtn = postButton.element;
-        console.log("[AutoPoster] Found Post button:", {
-          score: postButton.score,
-          text: postBtn?.textContent?.trim() || ''
-        });
-      }
-
-      if (postBtn) {
-        // Additional validation of selected button
-        const rect = postBtn.getBoundingClientRect();
-        const isInViewport = rect.top >= 0 && rect.bottom <= window.innerHeight;
-        
-        if (!isInViewport) {
-          console.log("[AutoPoster] Selected button not in viewport, scrolling...");
-          postBtn.scrollIntoView({ behavior: 'smooth', block: 'center' });
-          await delay(500);
-        }
-
-        break;
+    // Handle "Next" button first if present
+    const nextSpan = findSpanByText(dialog, 'Tiếp');
+    if (nextSpan) {
+      const nextButton = nextSpan.closest('[role="button"]') as HTMLElement || nextSpan.parentElement as HTMLElement;
+      if (nextButton && isElementVisible(nextButton)) {
+        console.log("[AutoPoster] Found Next button, clicking...");
+        nextButton.focus();
+        nextButton.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        await delay(300);
+        nextButton.click();
+        await delay(2000); // Wait for dialog transition
       }
     }
 
-    // Debug logging
-    if (attempt === 1 || attempt % 5 === 0) {
-      console.log(`[AutoPoster] Attempt ${attempt}/${maxAttempts} - Button candidates:`,
-        scoredButtons.map(b => ({
-          text: b.element.textContent?.trim().slice(0, 30),
-          score: b.score,
-          type: b.type,
-          aria: b.element.getAttribute('aria-label'),
-          classes: Array.from(b.element.classList).join(' ').slice(0, 50)
-        }))
-      );
-    }
-
-    console.log(`[AutoPoster] Chưa thấy nút Đăng, thử lại (${attempt}/${maxAttempts})`);
-    await delay(500);
-  }
-
-  if (!postBtn) {
-    console.error("[AutoPoster] Không tìm thấy nút Đăng");
-    const dumpButtons = Array.from(dialog.querySelectorAll("div[role='button'], button, [role='button']")) as HTMLElement[];
-    console.log("[AutoPoster] Buttons dump:", dumpButtons.slice(0, 20).map((b) => ({
-      text: (b.textContent || "").trim().slice(0, 30),
-      aria: (b.getAttribute("aria-label") || "").toLowerCase(),
-      testId: b.getAttribute("data-testid"),
-      disabled: b.getAttribute("aria-disabled") || (b as HTMLButtonElement).disabled,
-      visible: b.offsetParent !== null,
-      classes: b.className,
-      rect: b.getBoundingClientRect()
-    })));
-    return false;
-  }
-
-    // Enhanced click handling
-  try {
-    // Pre-click validation
-    if (!postBtn.isConnected || !postBtn.offsetParent) {
-      console.error("[AutoPoster] Button is detached or hidden");
+    // Now handle the final "Đăng" (Post) button using the enhanced function
+    console.log("[AutoPoster] Looking for final post button...");
+    const postSuccess = await clickPostButton(dialog);
+    
+    if (!postSuccess) {
+      console.error("[AutoPoster] Failed to click post button after all attempts");
       return false;
     }
-    
-    // Check if text content is appropriate
-    const btnText = postBtn.textContent?.trim().toLowerCase() || '';
-    if (btnText.includes('hủy') || btnText.includes('đóng')) {
-      console.error("[AutoPoster] Found wrong button type:", btnText);
-      return false;
-    }
-    
-    // 1. Scroll button into view if needed
-    const rect = postBtn.getBoundingClientRect();
-    if (rect.top < 0 || rect.bottom > window.innerHeight) {
-      postBtn.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      await delay(500);
-    }    // Enhanced click handling for specific button structure
-    let clicked = false;
-    
-    // Try different button target strategies in order of preference
-    const clickTargets = [
-      // 1. Exact text span
-      postBtn.querySelector<HTMLElement>('span.x1lliihq.x6ikm8r.x10wlt62.x1n2onr6.xlyipyv.xuxw1ft'),
-      
-      // 2. Parent span
-      toHTMLElement(postBtn.closest('span.x193iq5w.xeuugli.x13faqbe.x1vvkbs')),
-      
-      // 3. Button container
-      toHTMLElement(postBtn.querySelector('div[role="none"]')),
-      
-      // 4. Main wrapper
-      toHTMLElement(postBtn.closest('div.x1ja2u2z.x78zum5.x2lah0s.x1n2onr6')),
-      
-      // 5. Original target
-      postBtn
-    ];
-    
-    // Try each target until one succeeds
-    for (const target of clickTargets.filter(Boolean)) {
-      if (!isElementVisible(target!)) continue;
-      
-      try {
-        target!.focus();
-        await delay(CONSTANTS.CLICK_DELAY / 5);
-        target!.click();
-        clicked = true;
-        console.log("[AutoPoster] Successfully clicked:", target!.tagName, target!.className);
-        break;
-      } catch (err) {
-        console.warn("[AutoPoster] Click failed for target:", target!.tagName, err);
-        continue;
-      }
-    }
-    
-    if (!clicked) {
-      console.warn("[AutoPoster] All click attempts failed");
-    }
 
-    // Method 2: Simulated mouse events with precise targeting
-    if (!clicked) {
-      const rect = postBtn.getBoundingClientRect();
-      const centerX = rect.left + rect.width / 2;
-      const centerY = rect.top + rect.height / 2;
-
-      const events = [
-        new MouseEvent('mouseover', { bubbles: true, cancelable: true, view: window, clientX: centerX, clientY: centerY }),
-        new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window, clientX: centerX, clientY: centerY }),
-        new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window, clientX: centerX, clientY: centerY }),
-        new MouseEvent('click', { bubbles: true, cancelable: true, view: window, clientX: centerX, clientY: centerY })
-      ];
-
-      for (const event of events) {
-        postBtn.dispatchEvent(event);
-        await delay(50);
-      }
-      clicked = true;
-    }
-
-    // 4. Enhanced verification with dialog sequence handling
-    let verifyAttempts = 20; // Increased attempts
-    let inFirstDialog = true;
-    let previousState = '';
-    let lastClickTime = 0;
-    let postButtonClickCount = 0;
-    const MAX_POST_CLICKS = 3;
-    const CLICK_COOLDOWN = 3000; // 3 seconds between clicks
-    
-    while (verifyAttempts > 0) {
-      const currentDialog = document.querySelector('[role="dialog"]');
-      if (!currentDialog) {
-        console.log("[AutoPoster] Post completed - Dialog closed");
-        return true;
-      }
-
-      // Enhanced dialog state detection with comprehensive checks
-      const state = {
-        hasNextButton: findSpanByText(document.body, 'Tiếp') !== null,
-        hasPostButton: findSpanByText(document.body, 'Đăng') !== null,
-        hasShareDialog: !!document.querySelector('div[aria-label="Cài đặt bài viết"]'),
-        hasPostContainer: !!document.querySelector('div.x1ja2u2z.x78zum5.x2lah0s.x1n2onr6'),
-        isProcessing: !!document.querySelector('[role="progressbar"], .x1jx94hy, .xh8yej3, .x1n2onr6'),
-        hasOverlay: !!document.querySelector('.x1ey2m1c, .x9f619.x1n2onr6.x1ja2u2z, .x78zum5.xdt5ytf.x1n2onr6'),
-        dialogText: currentDialog.textContent?.trim() || '',
-        hasErrorMsg: !!document.querySelector('[aria-label*="error" i], [aria-label*="lỗi" i]'),
-        hasSuccessMsg: !!document.querySelector('[aria-label*="thành công" i], [aria-label*="success" i]'),
-        imageUploading: !!document.querySelector('div[aria-label*="Đang tải" i]'),
-      };
-
-      const currentState = JSON.stringify(state);
-      if (currentState !== previousState) {
-        console.log("[AutoPoster] Dialog state:", {
-          ...state,
-          timeSinceLastClick: Date.now() - lastClickTime,
-          postButtonClicks: postButtonClickCount,
-          remainingAttempts: verifyAttempts
-        });
-        previousState = currentState;
-      }
-
-      // If processing or overlay visible, wait
-      if (state.isProcessing || state.hasOverlay) {
-        const elapsedTime = (Date.now() - lastClickTime) / 1000;
-        
-        // If processing for too long, check for success indicators
-        if (elapsedTime > 15) {
-          // Check for common success indicators
-          const possibleSuccess = 
-            !document.querySelector('[role="dialog"]') || // Dialog closed
-            !!document.querySelector('.x1i10hfl') || // Success notification
-            document.querySelectorAll('[role="dialog"]').length === 0 || // All dialogs closed
-            document.querySelector('div[aria-label="Bài viết của bạn đã được chia sẻ"]'); // Post success message
-            
-          if (possibleSuccess) {
-            console.log("[AutoPoster] Post appears complete after timeout");
-            return true;
-          }
-        }
-        
-        // If still in first dialog after too long, try to recover
-        if (inFirstDialog && elapsedTime > 20) {
-          console.log("[AutoPoster] First dialog stuck, attempting recovery");
-          const nextButton = Array.from(document.querySelectorAll('[role="button"]'))
-            .find(btn => btn.textContent?.trim() === 'Tiếp');
-          if (nextButton) {
-            (nextButton as HTMLElement).click();
-            await delay(2000);
-          }
-        }
-        
-        // Log status and continue waiting
-        console.log("[AutoPoster] Processing or overlay visible, waiting...", {
-          elapsedTime,
-          inFirstDialog,
-          state
-        });
-        
-        await delay(1000);
-        continue;
-      }
-
-      // First dialog with Next button
-      if (inFirstDialog && state.hasNextButton) {
-        console.log("[AutoPoster] Found Next button in first dialog");
-        const nextBtn = Array.from(document.querySelectorAll('[role="button"]')).find(btn => {
-          const span = btn.querySelector('span');
-          return span?.textContent?.trim() === 'Tiếp';
-        });
-        
-        if (nextBtn) {
-          console.log("[AutoPoster] Clicking Next button");
-          (nextBtn as HTMLElement).click();
-          inFirstDialog = false;
-          lastClickTime = Date.now();
-          await delay(2000);
-          continue;
-        }
-      }
-
-      // Second dialog with Post button
-      if (!inFirstDialog && state.hasPostButton) {
-        const timeSinceLastClick = Date.now() - lastClickTime;
-        
-        if (timeSinceLastClick < CLICK_COOLDOWN) {
-          console.log("[AutoPoster] Waiting for click cooldown:", 
-            Math.round((CLICK_COOLDOWN - timeSinceLastClick) / 1000) + "s remaining");
-          await delay(500);
-          continue;
-        }
-
-        if (postButtonClickCount >= MAX_POST_CLICKS) {
-          console.warn("[AutoPoster] Max post button clicks reached");
-          return true; // Assume success after max clicks
-        }
-
-        console.log("[AutoPoster] Finding final post button");
-        // Try multiple button selection strategies
-        const postBtn = 
-          document.querySelector('div[role="button"] span[class*="x1lliihq"]:has-text("Đăng")') ||
-          document.querySelector('div.x1ja2u2z span:has-text("Đăng")') ||
-          Array.from(document.querySelectorAll('[role="button"]'))
-            .find(btn => btn.textContent?.trim() === 'Đăng');
-
-        if (postBtn) {
-          console.log("[AutoPoster] Clicking final post button");
-          const parent = postBtn.closest('[role="button"]') || postBtn.parentElement;
-          if (parent instanceof HTMLElement) {
-            parent.click();
-            postButtonClickCount++;
-            lastClickTime = Date.now();
-            await delay(3000);
-            continue;
-          }
-        }
-      }
-
-      // Success conditions
-      if (!state.hasNextButton && !state.hasPostButton && !state.isProcessing) {
-        console.log("[AutoPoster] Post completed - No more buttons and not processing");
-        return true;
-      }
-
-      await delay(500);
-      verifyAttempts--;
-    }
-
-    console.log("[AutoPoster] Post button clicked but dialog still present - may need manual verification");
+    console.log("[AutoPoster] Post submitted successfully");
     return true;
 
   } catch (err) {
-    console.error("[AutoPoster] Error during post button click:", err);
+    console.error("[AutoPoster] Error during posting:", err);
     return false;
   }
 }
-
-
-})();
