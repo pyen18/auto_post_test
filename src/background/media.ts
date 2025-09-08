@@ -1,18 +1,33 @@
+// Types
+interface MediaFetchResult {
+  ok: boolean;
+  name: string;
+  mime: string;
+  bufferBase64?: string;
+  size?: number;
+  originalUrl: string;
+  error?: string;
+}
+
+interface MimeExtensionMap {
+  [mime: string]: string;
+}
+
 // --- Helper functions ---------------------Media helpers-----
 // convert ArrayBuffer to Base64
-export function arrayBufferToBase64(buffer) {
+export function arrayBufferToBase64(buffer: ArrayBuffer): string {
   let binary = "";
   const bytes = new Uint8Array(buffer);
   const chunkSize = 0x8000;
   for (let i = 0; i < bytes.length; i += chunkSize) {
     const chunk = bytes.subarray(i, i + chunkSize);
-    binary += String.fromCharCode.apply(null, chunk);
+    binary += String.fromCharCode.apply(null, Array.from(chunk));
   }
   return btoa(binary);
 }
 
 // suy đoán mime và đảm bảo đuôi file hợp lệ.
-export function guessMimeFromExt(urlPath) {
+export function guessMimeFromExt(urlPath: string): string {
   const lower = urlPath.toLowerCase();
   if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "image/jpeg";
   if (lower.endsWith(".png")) return "image/png";
@@ -25,8 +40,8 @@ export function guessMimeFromExt(urlPath) {
   return "application/octet-stream";
 }
 
-export function ensureExtByMime(name, mime) {
-  const map = {
+export function ensureExtByMime(name: string, mime: string): string {
+  const map: MimeExtensionMap = {
     "image/jpeg": ".jpg",
     "image/jpg": ".jpg",
     "image/png": ".png",
@@ -46,7 +61,7 @@ export function ensureExtByMime(name, mime) {
 
 //fetch cross-origin (thêm UA, Accept, Referer tùy host), timeout 45s, trả {ok, name, mime, bufferBase64, size} để content script tạo File upload.
 // Fixed media fetch function
-export async function fetchMediaFromUrl(url) {
+export async function fetchMediaFromUrl(url: string): Promise<MediaFetchResult> {
   console.log("[Background] Starting fetchMediaFromUrl:", url);
   try {
     let cleanUrl = (url || "").trim();
@@ -59,7 +74,7 @@ export async function fetchMediaFromUrl(url) {
       cleanUrl = cleanUrl.slice(1, -1);
 
     const urlObj = new URL(cleanUrl);
-    const headers = {
+    const headers: Record<string, string> = {
       "User-Agent":
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
       Accept: "image/webp,image/apng,image/*,*/*;q=0.8,video/*",
@@ -105,7 +120,7 @@ export async function fetchMediaFromUrl(url) {
     } catch {}
     filename = ensureExtByMime(filename, contentType);
 
-    const result = {
+    const result: MediaFetchResult = {
       ok: true,
       name: filename,
       mime: contentType,
@@ -119,7 +134,7 @@ export async function fetchMediaFromUrl(url) {
       size: result.size,
     });
     return result;
-  } catch (error) {
+  } catch (error: any) {
     console.error("[Background] fetchMediaFromUrl error:", error);
     const msg =
       error && error.name === "AbortError"

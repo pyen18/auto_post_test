@@ -1,4 +1,4 @@
-export function parseHHMM(timeStr) {
+export function parseHHMM(timeStr: string): number | null {
   const match = /^(\d{1,2}):(\d{2})$/.exec(timeStr);
   if (!match) return null;
   const hours = parseInt(match[1], 10);

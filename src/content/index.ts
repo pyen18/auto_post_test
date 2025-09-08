@@ -1,19 +1,18 @@
 import { handleStartPost } from './message-handler';
 import { openPostDialog } from './ui';
+import type { PostJob } from '../types';
 
-interface WindowWithFlags extends Window {
-  __AUTOPOSTER_STATE__?: {
+// Enhanced initialization tracking with IIFE to prevent global pollution
+(() => {
+  interface ContentScriptState {
     initialized: boolean;
     initTime: number;
     version: string;
     url: string;
-  };
-}
+  }
 
-// Enhanced initialization tracking with IIFE to prevent global pollution
-(() => {
-  const win = window as WindowWithFlags;
-  const currentState = {
+  const win = window as Window & { __CONTENT_SCRIPT_STATE__?: ContentScriptState };
+  const currentState: ContentScriptState = {
     initialized: false,
     initTime: Date.now(),
     version: '1.0.0', // Update this when making major changes
@@ -21,12 +20,12 @@ interface WindowWithFlags extends Window {
   };
 
   // Only initialize if not already initialized or if URL has changed
-  if (!win.__AUTOPOSTER_STATE__ || 
-      win.__AUTOPOSTER_STATE__.url !== currentState.url ||
-      Date.now() - win.__AUTOPOSTER_STATE__.initTime > 3600000) { // Re-init after 1 hour
+  if (!win.__CONTENT_SCRIPT_STATE__ || 
+      win.__CONTENT_SCRIPT_STATE__.url !== currentState.url ||
+      Date.now() - win.__CONTENT_SCRIPT_STATE__.initTime > 3600000) { // Re-init after 1 hour
     
-    win.__AUTOPOSTER_STATE__ = currentState;
-    win.__AUTOPOSTER_STATE__.initialized = true;
+    win.__CONTENT_SCRIPT_STATE__ = currentState;
+    win.__CONTENT_SCRIPT_STATE__.initialized = true;
   
     console.log("[content] Content script initialized", {
       url: currentState.url,
@@ -35,9 +34,9 @@ interface WindowWithFlags extends Window {
     });
   } else {
     console.log("[content] Content script already active", {
-      existingUrl: win.__AUTOPOSTER_STATE__.url,
-      initTime: new Date(win.__AUTOPOSTER_STATE__.initTime).toISOString(),
-      version: win.__AUTOPOSTER_STATE__.version
+      existingUrl: win.__CONTENT_SCRIPT_STATE__.url,
+      initTime: new Date(win.__CONTENT_SCRIPT_STATE__.initTime).toISOString(),
+      version: win.__CONTENT_SCRIPT_STATE__.version
     });
   }
 })();
@@ -109,13 +108,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     // Get posts from storage and process them
     chrome.storage.local.get("postsToPost", async (result) => {
       try {
-        interface StoredPost {
-          content?: string;
-          mediaUrls?: string[];
-          rowId?: string;
-        }
-
-        const storedPosts = (result.postsToPost || []) as StoredPost[];
+        const storedPosts = (result.postsToPost || []) as Partial<PostJob>[];
         
         if (storedPosts.length === 0) {
           console.log("[content] No posts found in storage");
@@ -128,11 +121,13 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         }
 
         // Transform stored posts to expected format
-        const posts = storedPosts.map((p: StoredPost) => ({
+        const posts = storedPosts.map((p: Partial<PostJob>) => ({
           content: p.content || "",
           mediaUrls: p.mediaUrls || [],
-          rowId: p.rowId
-        }));
+          rowId: p.rowId || '',
+          time: p.time || '',
+          status: p.status || 'pending' as const
+        })) as PostJob[];
 
         // Open dialog before starting post sequence
         console.log("[content] Opening post dialog");
@@ -157,14 +152,14 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
         // Update post status and clean up
         if (response.success) {
-          const successfulPosts = storedPosts.slice(0, response.successCount);
+          const successfulPosts = storedPosts.slice(0, response.successCount || 0);
           for (const post of successfulPosts) {
             if (post.rowId) {
               chrome.runtime.sendMessage({
                 type: "POST_DONE",
                 rowId: post.rowId,
                 status: "done"
-              }, (resp) => {
+              }, (resp: unknown) => {
                 console.log("[content] POST_DONE response:", resp);
               });
             }
@@ -176,7 +171,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
         // Format user-friendly message
         const finalMessage = response.success
-          ? `Posted ${response.successCount} of ${response.totalPosts} items successfully`
+          ? `Posted ${response.successCount || 0} of ${storedPosts.length} items successfully`
           : response.message || "Failed to post content";
 
         // Send final response
@@ -185,7 +180,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           message: finalMessage
         });
 
-      } catch (e) {
+      } catch (e: unknown) {
         console.error("[content] Error processing posts:", e);
         sendResponse({
           success: false,

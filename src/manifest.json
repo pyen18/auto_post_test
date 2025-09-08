@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Auto FB Poster",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "Lấy bài viết từ Google Sheet và tự động đăng lên Facebook cá nhân",
   "permissions": [
     "storage",
@@ -26,15 +26,18 @@
     "https://*.firebaseio.com/*"
   ],
   "background": {
-    "service_worker": "background.js"
+    "service_worker": "background.js",
+    "type": "module"
   },
   "action": {
-    "default_popup": "index.html"
+    "default_popup": "index.html",
+    "default_title": "Auto FB Poster"
   },
   "content_scripts": [
     {
       "matches": ["https://*.facebook.com/*"],
-      "js": ["contentScript.js"]
+      "js": ["contentScript.js"],
+      "run_at": "document_idle"
     }
   ],
   "web_accessible_resources": [
@@ -42,5 +45,6 @@
       "resources": ["contentScript.js"],
       "matches": ["https://*.facebook.com/*"]
     }
-  ]
+  ],
+  "minimum_chrome_version": "88"
 }
