@@ -39,17 +39,30 @@ export interface PostResponse {
 }
 
 export interface ContentScriptMessage {
-  type: 'START_POST' | 'PING' | 'SYNC_DONE';
+  type: 'START_POST' | 'PING' | 'SYNC_DONE' | 'FETCH_MEDIA';
   posts?: PostJob[];
   payload?: Record<string, unknown>;
   timestamp?: number;
+  url?: string;
+}
+
+export interface MediaFetchResponse {
+  ok: boolean;
+  name: string;
+  mime: string;
+  bufferBase64?: string;
+  error?: string;
+  originalUrl?: string;
 }
 
 export interface ContentScriptResponse {
   ready?: boolean;
+  ok?: boolean;
   success?: boolean;
   message?: string;
   error?: string;
+  timestamp?: number;
+  url?: string;
 }
 
 // Cache and Storage Types

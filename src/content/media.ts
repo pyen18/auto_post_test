@@ -10,10 +10,10 @@ export function fetchMediaInBackground(url: string): Promise<{
   originalUrl?: string;
 }> {
   return new Promise((resolve) => {
-    console.log("[AutoPoster] Requesting media fetch for:", url);
+    console.log("[content] Requesting media download for:", url);
 
     const timeout = setTimeout(() => {
-      console.warn("[AutoPoster] Background fetch timeout");
+        console.warn("[content] Background media download timeout");
       resolve({
         ok: false,
         name: "",
@@ -23,11 +23,11 @@ export function fetchMediaInBackground(url: string): Promise<{
       });
     }, 70000);
 
-    chrome.runtime.sendMessage({ type: "FETCH_MEDIA", url }, (response) => {
+    chrome.runtime.sendMessage({ type: "DOWNLOAD_MEDIA", url }, (response) => {
       clearTimeout(timeout);
 
       if (chrome.runtime.lastError) {
-        console.error("[AutoPoster] Runtime error:", chrome.runtime.lastError);
+        console.error("[content] Runtime error:", chrome.runtime.lastError);
         resolve({
           ok: false,
           name: "",
@@ -39,7 +39,7 @@ export function fetchMediaInBackground(url: string): Promise<{
       }
 
       if (!response) {
-        console.error("[AutoPoster] No response from background");
+        console.error("[content] No response from background");
         resolve({
           ok: false,
           name: "",
@@ -56,12 +56,12 @@ export function fetchMediaInBackground(url: string): Promise<{
         try {
           buffer = base64ToArrayBuffer(response.bufferBase64);
         } catch (e) {
-          console.error("[AutoPoster] base64 decode error:", e);
+          console.error("[content] base64 decode error:", e);
         }
       }
 
       const size = buffer ? buffer.byteLength : 0;
-      console.log("[AutoPoster] Media fetch result:", {
+      console.log("[content] Media download result:", {
         ok: response.ok,
         name: response.name,
         mime: response.mime,
@@ -405,24 +405,13 @@ export function insertUrlAsText(editor: HTMLElement, url: string) {
 }
 
 
-// ====== Download media từ URL ======
+// Legacy function - use fetchMediaInBackground instead
 async function downloadMedia(url: string): Promise<Blob | null> {
-  return new Promise((resolve) => {
-    chrome.runtime.sendMessage({ type: "DOWNLOAD_MEDIA", url }, (res) => {
-      if (res?.success) {
-        const arr = res.data.split(",");
-        const mime = res.type || "application/octet-stream";
-        const bstr = atob(arr[1]);
-        let n = bstr.length;
-        const u8arr = new Uint8Array(n);
-        while (n--) u8arr[n] = bstr.charCodeAt(n);
-        resolve(new Blob([u8arr], { type: mime }));
-      } else {
-        resolve(null);
-      }
-      
-    });
-  });
+  const result = await fetchMediaInBackground(url);
+  if (result.ok && result.buffer) {
+    return new Blob([result.buffer], { type: result.mime });
+  }
+  return null;
 }
 
 

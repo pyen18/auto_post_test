@@ -9,9 +9,11 @@ interface ImageValidationOptions {
 }
 
 interface DownloadResponse {
-  success: boolean;
-  data: string;
-  type?: string;
+  ok: boolean;
+  bufferBase64?: string;
+  name: string;
+  mime: string;
+  error?: string;
 }
 
 // Constants
@@ -414,20 +416,31 @@ async function resizeImage(
 // Media Handling Functions
 async function downloadMedia(url: string): Promise<Blob | null> {
   try {
+    console.log('[content] Requesting media download for:', url);
+    
     const response = await new Promise<DownloadResponse>((resolve) => {
       chrome.runtime.sendMessage({ type: 'DOWNLOAD_MEDIA', url }, resolve);
     });
 
-    if (!response?.success) {
-      console.warn('[AutoPoster] Media download failed:', url);
+    if (!response?.ok || !response.bufferBase64) {
+      console.warn('[content] Media download failed:', url, response?.error);
       return null;
     }
 
-    const [, base64Data] = response.data.split(',');
-    const bytes = Uint8Array.from(atob(base64Data), c => c.charCodeAt(0));
-    return new Blob([bytes], { type: response.type || 'application/octet-stream' });
+    // Convert base64 to Blob
+    const bytes = Uint8Array.from(atob(response.bufferBase64), c => c.charCodeAt(0));
+    const blob = new Blob([bytes], { type: response.mime || 'application/octet-stream' });
+    
+    console.log('[content] Media download successful:', {
+      url,
+      name: response.name,
+      mime: response.mime,
+      size: blob.size
+    });
+    
+    return blob;
   } catch (error) {
-    console.error('[AutoPoster] Media download error:', url, error);
+    console.error('[content] Media download error:', url, error);
     return null;
   }
 }

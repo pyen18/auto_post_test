@@ -11,7 +11,8 @@ import type {
   CacheData, 
   ContentScriptMessage,
   ContentScriptResponse,
-  ProcessingLock
+  ProcessingLock,
+  MediaFetchResponse
 } from "../types";
 
 // Extend window interface for posting state
@@ -30,53 +31,8 @@ const SHEET_CSV_URL =
 // Firebase client is initialized in firebase.ts
 
 // ------------- Content Script Management -------------
-let contentScriptRegistered = false;
-
-async function ensureContentScriptRegistered(): Promise<boolean> {
-  if (contentScriptRegistered) return true;
-  
-  try {
-    if (!chrome.scripting?.getRegisteredContentScripts) {
-      console.warn("[content] Scripting API not available");
-      return false;
-    }
-
-    // First unregister any existing scripts
-    try {
-      await chrome.scripting.unregisterContentScripts({
-        ids: ["autoposter-dynamic"]
-      });
-    } catch {
-      // Ignore errors here as the script might not exist
-    }
-
-    // Register fresh content script
-    await chrome.scripting.registerContentScripts([{
-      id: "autoposter-dynamic",
-      matches: ["https://*.facebook.com/*"],
-      js: ["contentScript.js"],
-      runAt: "document_idle",
-      world: "ISOLATED"
-    }]);
-
-    console.log("[content] Successfully registered content script");
-    contentScriptRegistered = true;
-    return true;
-  } catch (e: unknown) {
-    console.error("[content] Failed to register content script:", e);
-    return false;
-  }
-}
-
-// Content script registration watchdog
-setInterval(async () => {
-  if (!contentScriptRegistered) {
-    await ensureContentScriptRegistered();
-  }
-}, 60000);
-
-// Initial registration
-ensureContentScriptRegistered();
+// Content scripts are now statically defined in manifest.json
+// No dynamic registration needed - just ensure proper communication
 
 // ---------- STORAGE HELPERS ----------
 function saveCacheToStorage(obj: CacheData): Promise<void> {
@@ -352,89 +308,113 @@ async function ensureFacebookTab(): Promise<number> {
 async function runPostViaContentScript(tabId: number, posts: PostJob[]): Promise<PostResponse> {
   await chrome.storage.local.set({ postsToPost: posts });
 
-  // Enhanced content script initialization with better error handling
-  const maxAttempts = 5;
-  let scriptReady = false;
-  let lastError: string | null = null;
+  // Verify tab is valid and on Facebook
+  const tab = await chrome.tabs.get(tabId);
+  if (!tab?.url?.includes('facebook.com')) {
+    console.error("[content] Tab not on Facebook:", tab?.url);
+    return { success: false, message: "Tab not on Facebook" };
+  }
 
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    console.log(`[content] Attempt ${attempt}/${maxAttempts} to initialize content script`);
-    
+  // Wait for content script to be ready with enhanced ping test
+  const maxPingAttempts = 15;
+  let contentScriptReady = false;
+  
+  for (let attempt = 1; attempt <= maxPingAttempts; attempt++) {
     try {
-      // Verify tab is still valid and on Facebook
-      const tab = await chrome.tabs.get(tabId);
-      if (!tab?.url?.includes('facebook.com')) {
-        lastError = "Tab not on Facebook";
-        console.error("[content] Tab validation failed:", lastError);
-        return { success: false, message: lastError };
-      }
-
-      // Clear any existing content script
-      try {
-        await chrome.scripting.unregisterContentScripts({
-          ids: ["autoposter-dynamic"]
+      console.log(`[content] Ping attempt ${attempt}/${maxPingAttempts}`);
+      
+      const pingResponse = await new Promise<ContentScriptResponse>((resolve) => {
+        const timeout = setTimeout(() => resolve({ ready: false }), 3000);
+        
+        chrome.tabs.sendMessage(tabId, { type: "PING" }, (response: ContentScriptResponse) => {
+          clearTimeout(timeout);
+          if (chrome.runtime.lastError) {
+            console.warn(`[content] Ping ${attempt} - runtime error:`, chrome.runtime.lastError.message);
+            resolve({ ready: false });
+          } else {
+            resolve(response || { ready: false });
+          }
         });
-      } catch {
-        // Ignore unregister errors
-      }
+      });
 
-      // Wait a moment for cleanup
-      await new Promise(r => setTimeout(r, 500));
+      if (pingResponse && (pingResponse.ready || pingResponse.ok)) {
+        console.log(`[content] Content script ready after ${attempt} attempts`);
+        contentScriptReady = true;
+        break;
+      }
       
-      // Register content script
-      await chrome.scripting.registerContentScripts([{
-        id: "autoposter-dynamic",
-        matches: ["https://*.facebook.com/*"],
-        js: ["contentScript.js"],
-        runAt: "document_idle",
-        world: "ISOLATED"
-      }]);
-
-      // Give the script time to initialize
-      await new Promise(resolve => setTimeout(resolve, 1000));
-      scriptReady = true;
-      console.log("[content] Content script successfully initialized");
-      break;
-
-    } catch (err: unknown) {
-      lastError = (err as Error).message || String(err);
-      console.error(`[content] Error in attempt ${attempt}:`, err);
-      
-      if ((err as Error).message?.includes("No tab with id")) {
-        return { success: false, message: "Tab was closed" };
+      // Wait before next ping attempt with exponential backoff
+      if (attempt < maxPingAttempts) {
+        const delay = Math.min(1000 * attempt, 5000);
+        await new Promise(r => setTimeout(r, delay));
       }
-
-      // Wait before next attempt if not last try
-      if (attempt < maxAttempts) {
-        await new Promise(r => setTimeout(r, 2000));
-      }
+    } catch (e: unknown) {
+      console.warn(`[content] Ping attempt ${attempt} error:`, e);
     }
   }
 
-  if (!scriptReady) {
-    console.error("[content] Failed to initialize content script after", maxAttempts, "attempts");
-    return { success: false, message: "Could not initialize content script" };
+  if (!contentScriptReady) {
+    console.error("[content] Content script not responding after", maxPingAttempts, "ping attempts");
+    
+    // Try to inject content script manually as fallback
+    try {
+      console.log("[content] Attempting manual content script injection");
+      await chrome.scripting.executeScript({
+        target: { tabId },
+        files: ['content.js']
+      });
+      
+      // Wait longer for manual injection to initialize
+      await new Promise(r => setTimeout(r, 5000));
+      
+      // Try final ping with longer timeout
+      const finalPing = await new Promise<ContentScriptResponse>((resolve) => {
+        const timeout = setTimeout(() => resolve({ ready: false }), 5000);
+        chrome.tabs.sendMessage(tabId, { type: "PING" }, (response: ContentScriptResponse) => {
+          clearTimeout(timeout);
+          resolve(chrome.runtime.lastError ? { ready: false } : (response || { ready: false }));
+        });
+      });
+      
+      if (!finalPing || (!finalPing.ready && !finalPing.ok)) {
+        return { success: false, message: "Content script injection failed - no response after manual injection" };
+      }
+      
+      console.log("[content] Manual injection successful");
+    } catch (injectionError: unknown) {
+      console.error("[content] Manual injection failed:", injectionError);
+      return { success: false, message: "Could not inject content script: " + String(injectionError) };
+    }
   }
 
-  // Send post request with enhanced error handling
-  const maxRetries = 3;
+  // Send post request with enhanced retry logic
+  const maxRetries = 5;
   
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
-      console.log(`[content] Starting attempt ${attempt}/${maxRetries}`);
+      console.log(`[content] Starting post attempt ${attempt}/${maxRetries}`);
       
-      // Verify tab is still valid
-      const tab = await chrome.tabs.get(tabId);
-      if (!tab.url?.includes('facebook.com')) {
-        console.error("[content] Tab is no longer on Facebook");
-        return { success: false, message: "Tab navigated away from Facebook" };
+      // Do a quick ping before each attempt to ensure connection
+      const prePostPing = await new Promise<ContentScriptResponse>((resolve) => {
+        const timeout = setTimeout(() => resolve({ ready: false }), 2000);
+        chrome.tabs.sendMessage(tabId, { type: "PING" }, (response: ContentScriptResponse) => {
+          clearTimeout(timeout);
+          resolve(chrome.runtime.lastError ? { ready: false } : (response || { ready: false }));
+        });
+      });
+      
+      if (!prePostPing || (!prePostPing.ready && !prePostPing.ok)) {
+        console.warn(`[content] Content script not ready before attempt ${attempt}`);
+        if (attempt < maxRetries) {
+          await new Promise(r => setTimeout(r, 2000));
+          continue;
+        }
       }
       
-      // Send the actual message
       const response = await new Promise<PostResponse>((resolve) => {
-        const timeoutDuration = 30000;
+        const timeoutDuration = 60000; // Increased timeout to 60 seconds
         const timeout = setTimeout(() => {
-          resolve({ success: false, message: "Request timed out" });
+          resolve({ success: false, message: `Request timed out after ${timeoutDuration/1000}s` });
         }, timeoutDuration);
 
         chrome.tabs.sendMessage(tabId, { 
@@ -444,34 +424,38 @@ async function runPostViaContentScript(tabId: number, posts: PostJob[]): Promise
         } as ContentScriptMessage, (response: PostResponse) => {
           clearTimeout(timeout);
           if (chrome.runtime.lastError) {
-            console.warn("[content] Message error:", chrome.runtime.lastError);
-            resolve({ success: false, error: chrome.runtime.lastError.message });
+            console.error(`[content] Message error on attempt ${attempt}:`, chrome.runtime.lastError.message);
+            resolve({ success: false, message: `Chrome runtime error: ${chrome.runtime.lastError.message}` });
+          } else if (!response) {
+            console.error(`[content] No response on attempt ${attempt}`);
+            resolve({ success: false, message: "No response from content script" });
           } else {
+            console.log(`[content] Response received on attempt ${attempt}:`, response);
             resolve(response);
           }
         });
       });
 
       if (response && (response.success || (response.successCount && response.successCount > 0))) {
-        console.log("[content] Post request succeeded");
+        console.log("[content] Post request succeeded:", response);
         return response;
       }
 
-      lastError = response.message || response.error || "Unknown error";
-      console.warn(`[content] Attempt ${attempt} failed:`, lastError);
+      console.warn(`[content] Attempt ${attempt} failed:`, response.message);
 
       if (attempt < maxRetries) {
-        await new Promise(r => setTimeout(r, 2000));
+        const retryDelay = Math.min(3000 * attempt, 10000); // Progressive delay
+        console.log(`[content] Waiting ${retryDelay}ms before retry...`);
+        await new Promise(r => setTimeout(r, retryDelay));
       }
     } catch (e: unknown) {
-      lastError = String(e);
       console.error(`[content] Error in attempt ${attempt}:`, e);
     }
   }
 
   return { 
     success: false, 
-    message: `Failed after ${maxRetries} attempts. Last error: ${lastError}` 
+    message: `Failed after ${maxRetries} attempts. Content script communication failed. Check if content script is properly injected on Facebook pages.` 
   };
 }
 
@@ -560,14 +544,14 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
       // Give Facebook time to fully load
       await new Promise(resolve => setTimeout(resolve, 5000));
       
-      // Clear existing content scripts and inject fresh
+      // Clear any existing posting state
       try {
         await chrome.scripting.executeScript({
           target: { tabId },
           func: () => {
             // Clear any existing state
-            window.postingInProgress = false;
-            window.currentPostOperation = null;
+            (window as Window & { postingInProgress?: boolean; currentPostOperation?: string | null }).postingInProgress = false;
+            (window as Window & { postingInProgress?: boolean; currentPostOperation?: string | null }).currentPostOperation = null;
           }
         });
       } catch (e: unknown) {
@@ -626,6 +610,151 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
     }
   }
 });
+
+// Enhanced message handler with media fetch support
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message.type === "CONTENT_SCRIPT_READY") {
+    console.log("[background] Content script ready notification from tab:", sender.tab?.id, {
+      url: message.url,
+      timestamp: new Date(message.timestamp).toISOString()
+    });
+    sendResponse({ received: true });
+    return true;
+  }
+  
+  if (message.type === "POST_DONE") {
+    console.log("[background] POST_DONE received for rowId:", message.rowId);
+    
+    // Update Firebase status asynchronously
+    if (message.rowId) {
+      Promise.all([
+        setAutoPostStatus(message.rowId, message.status || "done"),
+        updatePostStatusInFirebase(message.rowId, message.status || "done")
+      ]).then(() => {
+        console.log("[background] Firebase status updated for rowId:", message.rowId);
+      }).catch((error: unknown) => {
+        console.error("[background] Error updating Firebase status:", error);
+      });
+    }
+    
+    sendResponse({ received: true });
+    return true;
+  }
+  
+  if (message.type === "DOWNLOAD_MEDIA") {
+    console.log("[background] Media download request for:", message.url);
+    handleMediaFetch(message.url, sendResponse);
+    return true; // Keep message channel open for async response
+  }
+  
+  return false;
+});
+
+// Media fetch handler with proper error handling and base64 conversion
+async function handleMediaFetch(url: string, sendResponse: (response: MediaFetchResponse) => void): Promise<void> {
+  try {
+    if (!url || typeof url !== 'string') {
+      sendResponse({
+        ok: false,
+        name: '',
+        mime: '',
+        error: 'Invalid URL provided',
+        originalUrl: url
+      });
+      return;
+    }
+
+    console.log(`[background] Fetching media: ${url}`);
+    
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 second timeout
+    
+    const response = await fetch(url, {
+      method: 'GET',
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+      },
+      signal: controller.signal
+    });
+    
+    clearTimeout(timeoutId);
+    
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+    }
+    
+    const contentType = response.headers.get('content-type') || '';
+    const contentLength = response.headers.get('content-length');
+    
+    // Validate content type
+    if (!contentType.startsWith('image/') && !contentType.startsWith('video/')) {
+      console.warn(`[background] Unexpected content type: ${contentType}`);
+    }
+    
+    // Check file size (limit to 50MB)
+    if (contentLength && parseInt(contentLength) > 50 * 1024 * 1024) {
+      throw new Error(`File too large: ${contentLength} bytes`);
+    }
+    
+    const arrayBuffer = await response.arrayBuffer();
+    
+    if (arrayBuffer.byteLength === 0) {
+      throw new Error('Downloaded file is empty');
+    }
+    
+    // Convert to base64
+    const uint8Array = new Uint8Array(arrayBuffer);
+    let binaryString = '';
+    const chunkSize = 8192;
+    
+    for (let i = 0; i < uint8Array.length; i += chunkSize) {
+      const chunk = uint8Array.slice(i, i + chunkSize);
+      binaryString += String.fromCharCode.apply(null, Array.from(chunk));
+    }
+    
+    const base64 = btoa(binaryString);
+    
+    // Generate filename from URL
+    const urlObj = new URL(url);
+    const pathname = urlObj.pathname;
+    let filename = pathname.split('/').pop() || 'download';
+    
+    // Add extension if missing
+    if (!filename.includes('.')) {
+      const ext = contentType.split('/')[1] || 'bin';
+      filename += `.${ext}`;
+    }
+    
+    const result = {
+      ok: true,
+      name: filename,
+      mime: contentType,
+      bufferBase64: base64,
+      originalUrl: url
+    };
+    
+    console.log(`[background] Media fetch successful:`, {
+      url,
+      filename,
+      mime: contentType,
+      size: arrayBuffer.byteLength
+    });
+    
+    sendResponse(result);
+    
+  } catch (error: unknown) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    console.error(`[background] Media fetch failed for ${url}:`, errorMessage);
+    
+    sendResponse({
+      ok: false,
+      name: '',
+      mime: '',
+      error: errorMessage,
+      originalUrl: url
+    });
+  }
+}
 
 // Run initial sync on startup
 fetchAndSync();

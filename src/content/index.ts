@@ -2,197 +2,195 @@ import { handleStartPost } from './message-handler';
 import { openPostDialog } from './ui';
 import type { PostJob } from '../types';
 
+// Global posting flag to prevent duplicate START_POST handling
+let isPosting = false;
+
+// Define ContentScriptState interface outside IIFE for global access
+interface ContentScriptState {
+  initialized: boolean;
+  initTime: number;
+  version: string;
+  url: string;
+  messageListenerActive: boolean;
+}
+
 // Enhanced initialization tracking with IIFE to prevent global pollution
 (() => {
-  interface ContentScriptState {
-    initialized: boolean;
-    initTime: number;
-    version: string;
-    url: string;
-  }
 
   const win = window as Window & { __CONTENT_SCRIPT_STATE__?: ContentScriptState };
   const currentState: ContentScriptState = {
     initialized: false,
     initTime: Date.now(),
-    version: '1.0.0', // Update this when making major changes
-    url: window.location.href
+    version: '2.1.0',
+    url: window.location.href,
+    messageListenerActive: false
   };
 
-  // Only initialize if not already initialized or if URL has changed
-  if (!win.__CONTENT_SCRIPT_STATE__ || 
-      win.__CONTENT_SCRIPT_STATE__.url !== currentState.url ||
-      Date.now() - win.__CONTENT_SCRIPT_STATE__.initTime > 3600000) { // Re-init after 1 hour
-    
-    win.__CONTENT_SCRIPT_STATE__ = currentState;
-    win.__CONTENT_SCRIPT_STATE__.initialized = true;
+  // Always reinitialize to ensure fresh state
+  win.__CONTENT_SCRIPT_STATE__ = currentState;
+  win.__CONTENT_SCRIPT_STATE__.initialized = true;
   
-    console.log("[content] Content script initialized", {
+  console.log("[content] Content script initialized", {
+    version: currentState.version,
+    url: currentState.url
+  });
+  
+  // Notify background script that content script is ready
+  try {
+    chrome.runtime.sendMessage({
+      type: "CONTENT_SCRIPT_READY",
       url: currentState.url,
-      time: new Date(currentState.initTime).toISOString(),
-      version: currentState.version
+      timestamp: currentState.initTime
     });
-  } else {
-    console.log("[content] Content script already active", {
-      existingUrl: win.__CONTENT_SCRIPT_STATE__.url,
-      initTime: new Date(win.__CONTENT_SCRIPT_STATE__.initTime).toISOString(),
-      version: win.__CONTENT_SCRIPT_STATE__.version
-    });
+  } catch (e) {
+    console.warn("[content] Error notifying background script:", e);
   }
 })();
 
-// Enhanced message listener with better error handling
+// Enhanced message listener with better error handling and connection management
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-  if (message.type === "PING") {
-    try {
-      console.log("[content] PING received, script ready");
-      sendResponse({ ok: true, ready: true });
-    } catch (e) {
-      console.error("[content] Error handling PING:", e);
-      sendResponse({ ok: false, error: String(e) });
+    // Always respond to prevent "receiving end does not exist" errors
+    const respond = (response: unknown) => {
+      try {
+        sendResponse(response);
+      } catch (e) {
+        console.warn("[content] Error sending response:", e);
+      }
+    };
+
+    if (message.type === "PING") {
+      respond({ ok: true, ready: true, timestamp: Date.now(), url: location.href });
+      return true;
     }
-    return true;
-  }
   
   if (message.type === "DEBUG_DIALOGS") {
     try {
-      console.log("[content] DEBUG_DIALOGS requested");
       const dialogs = Array.from(document.querySelectorAll<HTMLElement>("[role='dialog']"));
-      const composers = Array.from(document.querySelectorAll<HTMLElement>("[data-pagelet*='Composer'], [data-testid*='composer'], [data-testid*='post']"));
-      const contentEditable = Array.from(document.querySelectorAll<HTMLElement>("[contenteditable='true']"));
-      
       const debugInfo = {
         url: location.href,
-        readyState: document.readyState,
-        visibility: document.visibilityState,
-        dialogs: dialogs.map((d, i) => ({
-          index: i,
-          text: (d.textContent || "").trim().slice(0, 100),
-          ariaLabel: d.getAttribute("aria-label") || "",
-          dataTestId: d.getAttribute("data-testid") || "",
-          visible: d.offsetParent !== null,
-          classes: d.className.slice(0, 100)
-        })),
-        composers: composers.map((c, i) => ({
-          index: i,
-          text: (c.textContent || "").trim().slice(0, 100),
-          dataPagelet: c.getAttribute("data-pagelet") || "",
-          dataTestId: c.getAttribute("data-testid") || "",
-          visible: c.offsetParent !== null
-        })),
-        contentEditable: contentEditable.map((ce, i) => ({
-          index: i,
-          text: (ce.textContent || "").trim().slice(0, 50),
-          role: ce.getAttribute("role") || "",
-          dataLexical: ce.getAttribute("data-lexical-editor") || "",
-          visible: ce.offsetParent !== null
-        }))
+        dialogs: dialogs.length
       };
-      
-      console.log("[content] DEBUG_DIALOGS result:", debugInfo);
       sendResponse(debugInfo);
     } catch (e) {
-      console.error("[content] Error in DEBUG_DIALOGS:", e);
       sendResponse({ error: String(e) });
     }
     return true;
   }
   
-  if (message.type === "START_POST") {
-    console.log("[content] START_POST received at", new Date().toISOString(), {
-      url: location.href,
-      readyState: document.readyState,
-      visibility: document.visibilityState,
-    });
-
-    // Get posts from storage and process them
-    chrome.storage.local.get("postsToPost", async (result) => {
-      try {
-        const storedPosts = (result.postsToPost || []) as Partial<PostJob>[];
-        
-        if (storedPosts.length === 0) {
-          console.log("[content] No posts found in storage");
-          sendResponse({ 
-            success: false, 
-            message: "No posts to process",
-            timestamp: Date.now()
-          });
-          return;
-        }
-
-        // Transform stored posts to expected format
-        const posts = storedPosts.map((p: Partial<PostJob>) => ({
-          content: p.content || "",
-          mediaUrls: p.mediaUrls || [],
-          rowId: p.rowId || '',
-          time: p.time || '',
-          status: p.status || 'pending' as const
-        })) as PostJob[];
-
-        // Open dialog before starting post sequence
-        console.log("[content] Opening post dialog");
-        const dialogOpened = await openPostDialog();
-        
-        if (!dialogOpened) {
-          console.error("[content] Failed to open post dialog");
-          sendResponse({
-            success: false,
-            message: "Could not open post dialog",
-            timestamp: Date.now()
-          });
-          return;
-        }
-
-        // Process posts with enhanced handling
-        const response = await handleStartPost({
-          type: "START_POST",
-          posts,
+    if (message.type === "START_POST") {
+      // Prevent duplicate START_POST execution
+      if (isPosting) {
+        console.warn("[content] START_POST already in progress, ignoring duplicate request");
+        respond({
+          success: false,
+          message: "Post already in progress",
           timestamp: Date.now()
         });
+        return true;
+      }
+      
+      console.log("[content] START_POST received");
+      isPosting = true;
 
-        // Update post status and clean up
-        if (response.success) {
-          const successfulPosts = storedPosts.slice(0, response.successCount || 0);
-          for (const post of successfulPosts) {
+      // Process asynchronously but ensure response is sent
+      (async () => {
+        try {
+          // Get posts from storage
+          const result = await new Promise<{ postsToPost?: Partial<PostJob>[] }>((resolve) => {
+            chrome.storage.local.get("postsToPost", (items) => resolve(items));
+          });
+          
+          const storedPosts = (result.postsToPost || []) as Partial<PostJob>[];
+          
+          if (storedPosts.length === 0) {
+            console.log("[content] No posts found in storage");
+            respond({ 
+              success: false, 
+              message: "No posts to process",
+              timestamp: Date.now()
+            });
+            return;
+          }
+
+          // Transform stored posts to expected format
+          const posts = storedPosts.map((p: Partial<PostJob>) => ({
+            content: p.content || "",
+            mediaUrls: p.mediaUrls || [],
+            rowId: p.rowId || '',
+            time: p.time || '',
+            status: p.status || 'pending' as const
+          })) as PostJob[];
+
+          // Open dialog before starting post sequence
+          console.log("[content] Opening post dialog");
+          const dialogOpened = await openPostDialog();
+          
+          if (!dialogOpened) {
+            console.error("[content] Failed to open post dialog");
+            respond({
+              success: false,
+              message: "Could not open post dialog",
+              timestamp: Date.now()
+            });
+            return;
+          }
+
+          // Process posts with enhanced handling
+          const response = await handleStartPost({
+            type: "START_POST",
+            posts,
+            timestamp: Date.now()
+          });
+
+          // Send POST_DONE message
+          if (response.success && storedPosts.length > 0) {
+            const post = storedPosts[0];
             if (post.rowId) {
               chrome.runtime.sendMessage({
                 type: "POST_DONE",
                 rowId: post.rowId,
                 status: "done"
-              }, (resp: unknown) => {
-                console.log("[content] POST_DONE response:", resp);
               });
+              console.log("[content] POST_DONE sent for rowId:", post.rowId);
             }
           }
+
+          // Clear storage
+          chrome.storage.local.remove("postsToPost");
+
+          // Format user-friendly message
+          const finalMessage = response.success
+            ? `Posted ${response.successCount || 0} of ${storedPosts.length} items successfully`
+            : response.message || "Failed to post content";
+
+          // Send final response
+          respond({
+            ...response,
+            message: finalMessage,
+            timestamp: Date.now()
+          });
+
+        } catch (e: unknown) {
+          console.error("[content] Error processing posts:", e);
+          respond({
+            success: false,
+            message: String(e),
+            error: "Error processing posts",
+            timestamp: Date.now()
+          });
+        } finally {
+          // Clear posting flag
+          isPosting = false;
         }
+      })();
 
-        // Clear storage
-        chrome.storage.local.remove("postsToPost");
+      return true;
+    }
 
-        // Format user-friendly message
-        const finalMessage = response.success
-          ? `Posted ${response.successCount || 0} of ${storedPosts.length} items successfully`
-          : response.message || "Failed to post content";
-
-        // Send final response
-        sendResponse({
-          ...response,
-          message: finalMessage
-        });
-
-      } catch (e: unknown) {
-        console.error("[content] Error processing posts:", e);
-        sendResponse({
-          success: false,
-          message: String(e),
-          error: "Error processing posts",
-          timestamp: Date.now()
-        });
-      }
-    });
-
+    // Unknown message type
+    respond({ success: false, message: "Unknown message type" });
     return true;
-  }
-
-  return false;
 });
+
+// Mark listener as active
+(window as Window & { __CONTENT_SCRIPT_STATE__?: { messageListenerActive: boolean } }).__CONTENT_SCRIPT_STATE__!.messageListenerActive = true;
