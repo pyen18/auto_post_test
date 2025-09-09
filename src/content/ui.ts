@@ -156,68 +156,154 @@ export async function waitForDialogClose(target?: HTMLElement, timeout = 45000):
 
 
 
+// Utility function to get Create Post selectors with proper escaping
+function getCreatePostSelectors(): string[] {
+  return [
+    // Highest priority: Exact Facebook post creation selectors
+    "[aria-label='Create a post']",
+    "[aria-label='Tạo bài viết']", 
+    "[data-testid='status-attachment-mentions-input']",
+    "[data-testid='composer-trigger']",
+    // Fixed: Use double quotes inside attribute selectors to avoid syntax errors
+    '[placeholder*="What\'s on your mind"]',
+    '[placeholder*="Bạn đang nghĩ gì"]',
+    // Fallback selectors for different languages and UI variations
+    '[aria-label*="on your mind"]',
+    '[aria-label*="nghĩ gì"]',
+    '[placeholder*="What are you thinking"]',
+    '[placeholder*="Share an update"]',
+    '[placeholder*="Write something"]',
+    
+    // Medium priority: Content editable areas in main feed only
+    "[role='main'] [contenteditable='true'][data-lexical-editor='true']",
+    "[role='main'] [role='textbox'][contenteditable='true']",
+    "[role='main'] div[role='textbox']",
+    
+    // Lower priority: Generic fallbacks
+    "div[role='textbox'][contenteditable='true']",
+    "[data-testid*='composer']",
+    "[data-testid*='post']"
+  ];
+}
+
+// Utility function to find Create Post element with multiple selector attempts
+function findCreatePostElement(
+  isValidCreatePostButton: (el: HTMLElement) => boolean,
+  isBadTarget: (el: HTMLElement) => boolean
+): HTMLElement | null {
+  const selectors = getCreatePostSelectors();
+  
+  for (const selector of selectors) {
+    try {
+      const elements = Array.from(document.querySelectorAll<HTMLElement>(selector));
+      
+      for (const element of elements) {
+        // Enhanced visibility and validation checks
+        const style = window.getComputedStyle(element);
+        const isVisible = element.offsetParent !== null && 
+                        !element.closest("[aria-hidden='true']") &&
+                        !element.closest("[style*='display: none']") &&
+                        style.visibility !== 'hidden' &&
+                        style.display !== 'none';
+        
+        if (isVisible && isValidCreatePostButton(element) && !isBadTarget(element)) {
+          console.log('[AutoPoster] Found Create Post element with selector:', selector);
+          return element;
+        }
+      }
+    } catch (e) {
+      console.warn('[AutoPoster] Selector failed:', selector, e);
+      continue;
+    }
+  }
+  
+  console.warn('[AutoPoster] No Create Post element found with any selector');
+  return null;
+}
+
 export async function openPostDialog(retries = 15): Promise<boolean> {
   for (let i = 0; i < retries; i++) {
-    console.log("[AutoPoster] Looking for create post trigger...");
-
-    // Enhanced set of selectors for Facebook's post triggers
-    const selectors = [
-      // Direct post trigger selectors
-      "[data-testid='create-post']",
-      "[data-testid='creation-trigger']",
-      "[aria-label='Create post']",
-      "[aria-label='Tạo bài viết']",
-      "[aria-label*='write']",
-      "[aria-label*='viết']",
-      // Feed-based triggers
-      "[role='region'] [contenteditable='true']",
-      "[role='main'] [contenteditable='true']",
-      // Secondary triggers
-      "[data-testid='composer-trigger']",
-      "[data-testid*='post']",
-      "[data-testid*='composer']",
-      "[role='button'][tabindex='0']",
-      // Feed area triggers
-      "div[role='main'] div[role='button']",
-      "div.x1lliihq div[role='button']", // Facebook's feed composer class
-      "div.xdj266r div[role='button']",  // Another Facebook composer class
-      // Generic triggers
-      "div[role='button']",
-      "span[role='button']",
-      "a[role='button']",
-      "button[type='button']"
-    ];
+    console.log(`[AutoPoster] Looking for create post trigger (attempt ${i + 1}/${retries})...`);
 
     let postTrigger: HTMLElement | null = null;
 
-    // Helper function to check if element is likely a bad target
+    // Helper function to validate if element is the correct Create Post button
+    const isValidCreatePostButton = (el: HTMLElement): boolean => {
+      const text = (el.textContent || '').toLowerCase();
+      const ariaLabel = (el.getAttribute('aria-label') || '').toLowerCase();
+      const placeholder = (el.getAttribute('placeholder') || '').toLowerCase();
+      
+      // Exact matches for Create Post button (highest confidence)
+      const exactMatches = [
+        ariaLabel === 'create a post',
+        ariaLabel === 'tạo bài viết',
+        placeholder.includes("what's on your mind"),
+        placeholder.includes('bạn đang nghĩ gì'),
+        text === 'create post',
+        text === 'tạo bài viết'
+      ];
+      
+      if (exactMatches.some(match => match)) {
+        console.log('[AutoPoster] Found exact Create Post match:', { text: text.slice(0, 50), ariaLabel, placeholder });
+        return true;
+      }
+      
+      // Partial matches with additional validation (fixed escaping)
+      const partialMatches = [
+        text.includes("what's on your mind") && !text.includes('cover'),
+        text.includes('bạn đang nghĩ gì') && !text.includes('bìa'),
+        (ariaLabel.includes('create') || ariaLabel.includes('tạo')) && ariaLabel.includes('post'),
+        text.includes('write something') && !text.includes('comment'),
+        ariaLabel.includes('on your mind') && !ariaLabel.includes('cover'),
+        placeholder.includes('share an update') && !placeholder.includes('comment')
+      ];
+      
+      return partialMatches.some(match => match);
+    };
+
+    // Enhanced function to check if element is likely a bad target
     const isBadTarget = (el: HTMLElement): boolean => {
       const text = (el.textContent || '').toLowerCase();
       const ariaLabel = (el.getAttribute('aria-label') || '').toLowerCase();
       const href = (el as HTMLAnchorElement).href?.toLowerCase() || '';
+      const dataTestId = (el.getAttribute('data-testid') || '').toLowerCase();
       
-      // Skip elements that look like they're for live video/events/etc
+      // CRITICAL: Explicitly exclude cover photo and profile editing elements
+      const coverPhotoPatterns = [
+        'edit cover photo', 'chỉnh sửa ảnh bìa', 'cover photo', 'ảnh bìa',
+        'edit profile', 'chỉnh sửa trang cá nhân', 'update cover photo',
+        'change cover photo', 'thay đổi ảnh bìa', 'cập nhật ảnh bìa'
+      ];
+      
+      // Skip elements that look like they're for other features
       const badPatterns = [
         'live', 'video', 'sự kiện', 'event', 'stream', 'story', 
-        'photo', 'ảnh', 'hình', 'reel', 'marketplace', 'group', 
-        'nhóm', 'chat', 'message', 'tin nhắn'
+        'reel', 'marketplace', 'group', 'nhóm', 'chat', 'message', 
+        'tin nhắn', 'watch', 'xem', 'gaming', 'trò chơi'
       ];
 
-      // Skip elements that look like navigation or utility buttons
+      // Skip navigation and utility elements
       const skipPatterns = [
         'menu', 'search', 'tìm', 'notification', 'thông báo',
-        'profile', 'account', 'setting', 'cài đặt', 'help', 'trợ giúp'
+        'account', 'setting', 'cài đặt', 'help', 'trợ giúp',
+        'more', 'thêm', 'see all', 'xem tất cả'
       ];
 
       // Check if URL indicates wrong page/feature
       if (href && (
-        href.includes('/live/') || 
-        href.includes('/events/') || 
-        href.includes('/marketplace/') ||
-        href.includes('/groups/') ||
-        href.includes('/photos/') ||
-        href.includes('/videos/')
+        href.includes('/live/') || href.includes('/events/') || 
+        href.includes('/marketplace/') || href.includes('/groups/') ||
+        href.includes('/photos/') || href.includes('/videos/') ||
+        href.includes('/watch/') || href.includes('/gaming/')
       )) {
+        return true;
+      }
+
+      // CRITICAL: Check for cover photo patterns first
+      if (coverPhotoPatterns.some(pattern => 
+        text.includes(pattern) || ariaLabel.includes(pattern) || dataTestId.includes(pattern)
+      )) {
+        console.log('[AutoPoster] Skipping cover photo element:', { text: text.slice(0, 50), ariaLabel });
         return true;
       }
 
@@ -229,93 +315,8 @@ export async function openPostDialog(retries = 15): Promise<boolean> {
     };
 
 
-    // First try: Look for visible composer textbox and its container
-    const directComposer = document.querySelector<HTMLElement>(
-      "div[contenteditable='true'][data-lexical-editor='true']"
-    );
-    
-    if (directComposer && directComposer.offsetParent !== null) {
-      // Look for the nearest container in order of preference
-      const container = 
-        directComposer.closest<HTMLElement>("[role='dialog']") ||
-        directComposer.closest<HTMLElement>("[role='main']") ||
-        directComposer.closest<HTMLElement>("[role='region']");
-
-      if (container) {
-        const style = window.getComputedStyle(container);
-        if (style.display !== 'none' && style.visibility !== 'hidden') {
-          postTrigger = container;
-        }
-      }
-    }
-
-    // Second try: Look through all selectors
-    if (!postTrigger) {
-      for (const selector of selectors) {
-        const elements = Array.from(document.querySelectorAll<HTMLElement>(selector))
-          .filter(el => {
-            // Enhanced visibility checks
-            const style = window.getComputedStyle(el);
-            const isVisible = el.offsetParent !== null && 
-                            !el.closest("[aria-hidden='true']") &&
-                            !el.closest("[style*='display: none']") &&
-                            style.visibility !== 'hidden' &&
-                            style.display !== 'none';
-            
-            const rect = el.getBoundingClientRect();
-            const hasSize = rect.width > 0 && rect.height > 0;
-            const isInViewport = rect.top >= 0 && 
-                               rect.left >= 0 && 
-                               rect.bottom <= window.innerHeight &&
-                               rect.right <= window.innerWidth;
-            
-            // Enhanced interactivity checks
-            const isEnabled = !el.getAttribute("aria-disabled") && 
-                            !el.classList.contains("disabled") &&
-                            !el.getAttribute("disabled") &&
-                            style.pointerEvents !== 'none';
-            
-            // Enhanced text relevance check with score-based approach
-            const text = (el.textContent || "").toLowerCase();
-            const ariaLabel = (el.getAttribute("aria-label") || "").toLowerCase();
-            const dataTestId = (el.getAttribute("data-testid") || "").toLowerCase();
-
-            // Filter out bad targets
-            if (isBadTarget(el)) return false;
-
-            // Score the element
-            let score = 0;
-
-            // Strong positive indicators
-            if (text.includes('tạo bài viết') || ariaLabel.includes('tạo bài viết')) score += 100;
-            if (text.includes('bạn đang nghĩ gì') || text.includes("what's on your mind")) score += 100;
-            if (text.match(/\b(đăng bài|post)\b/)) score += 80;
-            if (ariaLabel.match(/\b(đăng bài|post)\b/)) score += 80;
-
-            // Good indicators
-            if (text.includes('viết') || text.includes('write')) score += 40;
-            if (dataTestId.includes('composer') || dataTestId.includes('create-post')) score += 50;
-            
-            // Location-based scoring
-            const isInMainFeed = el.closest('[role="main"]') !== null;
-            if (isInMainFeed) score += 30;
-
-            // Element characteristics
-            if (el.getAttribute('role') === 'textbox') score += 20;
-            if (el.getAttribute('contenteditable') === 'true') score += 20;
-            if (el.tagName === 'DIV' && el.getAttribute('role') === 'button') score += 10;
-
-            const hasRelevantScore = score >= 50;
-            return isVisible && hasSize && isEnabled && hasRelevantScore && isInViewport;
-          });
-
-        // Take the first matching element
-        if (elements.length > 0) {
-          postTrigger = elements[0];
-          break;
-        }
-      }
-    }
+    // Use utility function to find Create Post element
+    postTrigger = findCreatePostElement(isValidCreatePostButton, isBadTarget);
 
     // If no trigger found, try a broader search
     if (!postTrigger) {
@@ -324,24 +325,20 @@ export async function openPostDialog(retries = 15): Promise<boolean> {
       ));
 
       postTrigger = allCandidates.find(el => {
-        const text = (el.textContent || "").toLowerCase();
-        const aria = (el.getAttribute("aria-label") || "").toLowerCase();
+        // Apply strict validation and bad target filtering
+        if (isBadTarget(el)) {
+          return false;
+        }
         
-        const relevantText = 
-          text.includes("tạo bài viết") ||
-          text.includes("create post") ||
-          text.includes("write something") ||
-          text.includes("what's on your mind") ||
-          text.includes("bạn đang nghĩ gì") ||
-          aria.includes("create") ||
-          aria.includes("post") ||
-          aria.includes("tạo") ||
-          aria.includes("viết");
+        if (!isValidCreatePostButton(el)) {
+          return false;
+        }
 
+        // Additional visibility and interaction checks
         return (
           el.offsetParent !== null && // Visible
           !el.getAttribute("aria-disabled") && // Not disabled
-          relevantText
+          !el.closest('[aria-hidden="true"]') // Not in hidden container
         );
       }) || null;
     }
@@ -357,14 +354,24 @@ export async function openPostDialog(retries = 15): Promise<boolean> {
 
       // Enhanced click method with multiple fallbacks
       try {
-        // Validate the element one last time before clicking
+        // CRITICAL: Final validation before clicking
         if (isBadTarget(postTrigger)) {
-          console.warn("[AutoPoster] Prevented click on potentially bad target", {
+          console.warn("[AutoPoster] BLOCKED: Prevented click on bad target (likely cover photo)", {
             text: postTrigger.textContent?.trim(),
             ariaLabel: postTrigger.getAttribute("aria-label"),
             href: (postTrigger as HTMLAnchorElement).href
           });
-          return false;
+          // Continue to next iteration instead of failing
+          continue;
+        }
+        
+        if (!isValidCreatePostButton(postTrigger)) {
+          console.warn("[AutoPoster] BLOCKED: Element failed Create Post validation", {
+            text: postTrigger.textContent?.trim(),
+            ariaLabel: postTrigger.getAttribute("aria-label")
+          });
+          // Continue to next iteration instead of failing
+          continue;
         }
 
         // Store the initial URL

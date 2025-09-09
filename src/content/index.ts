@@ -2,6 +2,15 @@ import { handleStartPost } from './message-handler';
 import { openPostDialog } from './ui';
 import type { PostJob } from '../types';
 
+// CRITICAL: Hostname guard - only run on facebook.com
+if (!window.location.hostname.includes('facebook.com')) {
+  console.log('[content] Not on facebook.com, exiting content script. Current hostname:', window.location.hostname);
+  // Exit early - don't initialize anything
+  throw new Error('Content script should only run on facebook.com');
+}
+
+console.log('[content] Confirmed running on facebook.com, initializing content script');
+
 // Global posting flag to prevent duplicate START_POST handling
 let isPosting = false;
 

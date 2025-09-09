@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { usePosts } from "./hooks/usePosts";
+import "./popup.css";
 import {
   startPosting,
   setSchedule,

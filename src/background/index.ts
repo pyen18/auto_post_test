@@ -232,36 +232,64 @@ const processingLock: ProcessingLock = {
 
 // ===== Alarm Handler for Posting =====
 async function ensureFacebookTab(): Promise<number> {
+  console.log("[AutoPoster] Ensuring Facebook tab is available...");
+  
   // First check for an existing Facebook tab
   const fbTabs = await chrome.tabs.query({ url: "*://*.facebook.com/*" });
   
-  // Filter for main facebook.com tabs (not subdomains)
-  const mainFbTabs = fbTabs.filter(tab => 
-    tab.url?.match(/^https?:\/\/(www\.)?facebook\.com\//)
-  );
+  // Filter for main facebook.com tabs (not subdomains like m.facebook.com, fbsbx.com)
+  const mainFbTabs = fbTabs.filter(tab => {
+    const url = tab.url || '';
+    const hostname = new URL(url).hostname;
+    // Only allow facebook.com and www.facebook.com, exclude fbsbx.com and other subdomains
+    return hostname === 'facebook.com' || hostname === 'www.facebook.com';
+  });
 
   let tab: chrome.tabs.Tab;
+  
   if (mainFbTabs.length > 0) {
     // Use the first Facebook tab found
     tab = mainFbTabs[0];
-    // If it's not active, activate it
-    if (!tab.active && tab.id) {
-      await chrome.tabs.update(tab.id, { active: true });
-      if (tab.windowId) {
-        await chrome.windows.update(tab.windowId, { focused: true });
+    console.log("[AutoPoster] Found existing Facebook tab:", tab.url);
+    
+    // Check if tab is on a suitable page for posting
+    const currentUrl = tab.url || '';
+    const needsRedirect = currentUrl.includes('/me') || 
+                         currentUrl.includes('/profile.php') ||
+                         currentUrl.includes('/groups/') ||
+                         currentUrl.includes('/marketplace/') ||
+                         currentUrl.includes('/watch/') ||
+                         currentUrl.includes('/events/');
+    
+    if (needsRedirect) {
+      console.log("[AutoPoster] Redirecting tab to Facebook dashboard for posting compatibility");
+      await chrome.tabs.update(tab.id!, { 
+        url: "https://www.facebook.com/",
+        active: true 
+      });
+    } else {
+      // Just activate the existing suitable tab
+      if (!tab.active && tab.id) {
+        await chrome.tabs.update(tab.id, { active: true });
       }
     }
+    
+    // Ensure window is focused
+    if (tab.windowId) {
+      await chrome.windows.update(tab.windowId, { focused: true });
+    }
   } else {
-    // No Facebook tab found, create new one
+    // No Facebook tab found, create new one with correct URL
+    console.log("[AutoPoster] Creating new Facebook tab with dashboard URL");
     tab = await chrome.tabs.create({ 
-      url: "https://www.facebook.com/me",
+      url: "https://www.facebook.com/",  // Always open dashboard, never profile
       active: true 
     });
   }
 
   // Wait for the tab to be fully loaded
   const tabId = tab.id!;
-  console.log("[AutoPoster] Waiting for Facebook tab to load:", tabId);
+  console.log("[AutoPoster] Waiting for Facebook tab to load completely:", tabId);
   
   const maxWaitTime = 30000; // 30 seconds
   const start = Date.now();
@@ -272,7 +300,9 @@ async function ensureFacebookTab(): Promise<number> {
       
       // Check if the page is fully loaded
       if (currentTab.status === "complete") {
-        // Additional check: try to ping the content script
+        console.log("[AutoPoster] Tab status complete, checking content script...");
+        
+        // Additional check: try to ping the content script and validate hostname
         try {
           const response = await new Promise<ContentScriptResponse>((resolve) => {
             const timeout = setTimeout(() => resolve({ ready: false }), 2000);
@@ -282,15 +312,32 @@ async function ensureFacebookTab(): Promise<number> {
             });
           });
           
+          // Validate that we're on the correct Facebook domain
+          const currentTab = await chrome.tabs.get(tabId);
+          const currentUrl = currentTab.url || '';
+          const hostname = new URL(currentUrl).hostname;
+          
+          if (hostname !== 'facebook.com' && hostname !== 'www.facebook.com') {
+            console.warn("[AutoPoster] Tab navigated to wrong domain:", hostname, "- redirecting to facebook.com");
+            await chrome.tabs.update(tabId, { url: "https://www.facebook.com/" });
+            await new Promise(r => setTimeout(r, 2000));
+            continue;
+          }
+          
           if (response && response.ready) {
-            console.log("[AutoPoster] Facebook tab ready and content script responding");
-            // Give the page a little more time to fully initialize
+            console.log("[AutoPoster] ✅ Facebook tab ready and content script responding on correct domain");
+            // Give the page a little more time to fully initialize UI
             await new Promise(r => setTimeout(r, 2000));
             return tabId;
+          } else {
+            console.log("[AutoPoster] Content script not ready yet, continuing to wait...");
           }
         } catch {
           // Content script not ready yet, continue waiting
+          console.log("[AutoPoster] Content script ping failed, continuing to wait...");
         }
+      } else {
+        console.log("[AutoPoster] Tab still loading, status:", currentTab.status);
       }
       
       await new Promise(r => setTimeout(r, 1000));
@@ -301,7 +348,8 @@ async function ensureFacebookTab(): Promise<number> {
   }
   
   // If we get here, the tab is either loaded or we timed out
-  console.log("[AutoPoster] Facebook tab load complete or timeout reached");
+  const elapsed = Math.round((Date.now() - start) / 1000);
+  console.log(`[AutoPoster] Facebook tab preparation complete after ${elapsed}s (timeout: ${elapsed >= 30})`);
   return tabId;
 }
 

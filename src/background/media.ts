@@ -117,7 +117,9 @@ export async function fetchMediaFromUrl(url: string): Promise<MediaFetchResult> 
     try {
       const last = urlObj.pathname.split("/").pop();
       if (last) filename = last.split("?")[0];
-    } catch {}
+    } catch {
+      // Ignore parsing errors for filename extraction
+    }
     filename = ensureExtByMime(filename, contentType);
 
     const result: MediaFetchResult = {
@@ -134,12 +136,12 @@ export async function fetchMediaFromUrl(url: string): Promise<MediaFetchResult> 
       size: result.size,
     });
     return result;
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("[Background] fetchMediaFromUrl error:", error);
     const msg =
-      error && error.name === "AbortError"
+      error && typeof error === 'object' && 'name' in error && error.name === "AbortError"
         ? "Request timeout - file too large or server too slow"
-        : error?.message || String(error);
+        : (error && typeof error === 'object' && 'message' in error ? (error as Error).message : String(error));
     return { ok: false, name: "", mime: "", error: msg, originalUrl: url };
   }
 }

@@ -27,7 +27,7 @@ declare global {
 
 export async function openFacebookAndPost(posts: PostJob[]): Promise<PostResponse> {
   try {
-    const fbUrl = "https://www.facebook.com/me/";
+    const fbUrl = "https://www.facebook.com/";
     let fbTab: chrome.tabs.Tab;
 
     // Helper function to inject content script
@@ -156,15 +156,38 @@ export async function openFacebookAndPost(posts: PostJob[]): Promise<PostRespons
       window.__AUTOPOSTER_STATE__.lastTabId = fbTab.id;
     }
 
-    // Wait for tab to be fully ready
+    // Helper function to wait for tab completion
+    const waitForTabComplete = async (tabId: number): Promise<void> => {
+      return new Promise((resolve) => {
+        const checkComplete = () => {
+          chrome.tabs.get(tabId, (tab) => {
+            if (chrome.runtime.lastError) {
+              console.warn("[AutoPoster] Tab check error:", chrome.runtime.lastError);
+              resolve();
+              return;
+            }
+            if (tab.status === 'complete') {
+              console.log("[AutoPoster] Tab loading complete");
+              resolve();
+            } else {
+              setTimeout(checkComplete, 500);
+            }
+          });
+        };
+        checkComplete();
+      });
+    };
+
+    // Wait for tab to be fully ready with enhanced completion check
     if (fbTab.id) {
+      await waitForTabComplete(fbTab.id);
       await waitForTab(fbTab.id);
     } else {
       throw new Error("Failed to get tab ID");
     }
 
-    // Additional wait for Facebook UI
-    await new Promise(r => setTimeout(r, 2000));
+    // Additional wait for Facebook UI to fully load
+    await new Promise(r => setTimeout(r, 3000));
 
     // Enhanced message sending with retries
     const sendMessageWithRetry = async (

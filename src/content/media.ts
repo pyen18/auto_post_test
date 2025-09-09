@@ -23,7 +23,7 @@ export function fetchMediaInBackground(url: string): Promise<{
       });
     }, 70000);
 
-    chrome.runtime.sendMessage({ type: "DOWNLOAD_MEDIA", url }, (response) => {
+    chrome.runtime.sendMessage({ type: "DOWNLOAD_MEDIA", url }, (response: { ok: boolean; bufferBase64?: string; name: string; mime: string; error?: string }) => {
       clearTimeout(timeout);
 
       if (chrome.runtime.lastError) {
@@ -55,7 +55,7 @@ export function fetchMediaInBackground(url: string): Promise<{
       if (response.bufferBase64) {
         try {
           buffer = base64ToArrayBuffer(response.bufferBase64);
-        } catch (e) {
+        } catch (e: unknown) {
           console.error("[content] base64 decode error:", e);
         }
       }
@@ -160,7 +160,7 @@ export function createFileFromBuffer(
     if (file.size === 0) throw new Error("Created file has zero size");
 
     return file;
-  } catch (error) {
+  } catch (error: unknown) {
     console.error("[AutoPoster] Error creating file:", error);
     return null;
   }
@@ -279,7 +279,7 @@ export async function attachMedia(
         console.log(`[AutoPoster] Successfully processed: ${file.name} (${file.size} bytes)`);
 
         if (i < mediaUrls.length - 1) await delay(200);
-      } catch (error) {
+      } catch (error: unknown) {
         const errorMsg = `Error processing ${url}: ${error}`;
         console.error("[AutoPoster]", errorMsg);
         errors.push(errorMsg);
@@ -340,7 +340,7 @@ export async function attachMedia(
         }
 
         await delay(2000);
-      } catch (error) {
+      } catch (error: unknown) {
         console.error("[AutoPoster] Error assigning files to input:", error);
         return false;
       }
@@ -352,7 +352,7 @@ export async function attachMedia(
 
     console.log("[AutoPoster] Media attachment process completed");
     return true;
-  } catch (error) {
+  } catch (error: unknown) {
     console.error("[AutoPoster] Error in attachMedia:", error);
     return false;
   }
@@ -453,7 +453,7 @@ export async function uploadMedia(dialog: HTMLElement, mediaUrls: string[]): Pro
 
     console.log("[AutoPoster] Media uploaded:", mediaUrls);
     return true;
-  } catch (err) {
+  } catch (err: unknown) {
     console.error("[AutoPoster] uploadMedia error:", err);
     return false;
   }

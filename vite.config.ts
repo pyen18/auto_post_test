@@ -46,6 +46,10 @@ export default defineConfig({
         assetFileNames: (assetInfo) => {
           // Handle different asset types
           if (assetInfo.name?.endsWith('.css')) {
+            // Put popup CSS in popup directory with main.css name
+            if (assetInfo.name.includes('main')) {
+              return 'popup/main.css';
+            }
             return 'assets/[name].[ext]';
           }
           return 'assets/[name]-[hash].[ext]';
